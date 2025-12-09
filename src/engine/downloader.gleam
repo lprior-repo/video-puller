@@ -40,8 +40,8 @@ pub fn start(
 
 /// Handle messages sent to the downloader actor
 fn handle_message(
-  message: DownloaderMessage,
   state: DownloaderState,
+  message: DownloaderMessage,
 ) -> actor.Next(DownloaderState, DownloaderMessage) {
   case message {
     Download(job_id, url, reply) -> {

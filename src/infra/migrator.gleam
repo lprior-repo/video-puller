@@ -98,11 +98,17 @@ fn is_migration_applied(conn: Db, filename: String) -> Result(Bool, DbError) {
 /// Record that a migration has been applied
 fn record_migration(conn: Db, filename: String) -> Result(Nil, DbError) {
   let sql =
-    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, strftime('%s', 'now'))"
+    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)"
 
-  db.exec(conn, sql)
+  let timestamp = get_timestamp()
+
+  db.query(conn, sql, [sqlight.text(filename), sqlight.int(timestamp)], decode.at([0], decode.int))
   |> result.replace_error(db.MigrationError(
     "Failed to record migration: " <> filename,
   ))
   |> result.replace(Nil)
 }
+
+/// Get current Unix timestamp
+@external(erlang, "os", "system_time")
+fn get_timestamp() -> Int
