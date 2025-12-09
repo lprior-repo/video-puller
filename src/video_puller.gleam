@@ -1,3 +1,5 @@
+import core/supervisor
+import gleam/erlang/process
 import gleam/io
 import gleam/list
 import gleam/result
@@ -5,12 +7,27 @@ import gleam/string
 
 /// Main entry point for the application
 pub fn main() -> Nil {
-  io.println("Hello from video_puller!")
+  io.println("🎬 FractalVideoEater - Video Download System")
+  io.println("============================================")
+  io.println("")
 
-  // Example usage of utility functions
-  case validate_url("https://example.com/video") {
-    Ok(url) -> io.println("Valid URL: " <> url)
-    Error(msg) -> io.println("Error: " <> msg)
+  // Start the root supervisor tree
+  case supervisor.start() {
+    Ok(started) -> {
+      io.println("")
+      io.println("✅ Application started successfully!")
+      io.println("PID: " <> string.inspect(started.pid))
+      io.println("")
+      io.println("Press Ctrl+C to stop")
+
+      // Keep the main process alive
+      process.sleep_forever()
+    }
+    Error(err) -> {
+      io.println("")
+      io.println("❌ Failed to start application")
+      io.println("Error: " <> string.inspect(err))
+    }
   }
 }
 
