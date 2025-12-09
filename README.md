@@ -133,17 +133,56 @@ See `.claude/docs/mcp-agent-setup.md` for comprehensive setup instructions.
 
 ## Beads Integration
 
-Support for Steve Yegge's beads system:
+This project uses [beads](https://github.com/steveyegge/beads) - a lightweight, distributed issue tracker designed for AI coding agents.
+
+### Quick Start
 
 ```bash
-# Research and set up beads
-just setup-beads
+# Show ready work (unblocked issues)
+just beads-ready
 
-# Or use the slash command
-/setup-beads
+# Create a new issue
+just beads-create "Issue title" task 1
+
+# Update issue status
+just beads-update bd-a1b2 in_progress
+
+# Show database status
+just beads-status
+
+# Sync with git
+just beads-sync
 ```
 
-See `.claude/docs/beads-setup.md` for detailed documentation.
+### Nushell Scripts
+
+```bash
+nu scripts/beads-ready.nu      # Check ready work with nice formatting
+nu scripts/beads-create.nu     # Interactive issue creation
+nu scripts/beads-update.nu     # Update issue fields
+nu scripts/beads-sync.nu       # Sync and optionally commit
+nu scripts/beads-status.nu     # Comprehensive status overview
+```
+
+### Features
+
+- 🎯 **Zero-Setup Distributed Database** - Git-backed, no server required
+- 🔗 **Four Dependency Types** - blocks, related, parent-child, discovered-from
+- 🆔 **Hash-Based IDs** - Collision-resistant (e.g., `bd-a1b2`)
+- ✅ **Ready Work Detection** - Automatically finds unblocked issues
+- 📊 **JSON Output** - All commands support `--json` for agents
+
+### Essential Commands
+
+```bash
+bd ready                        # Show unblocked issues
+bd create "Task" -t feature    # Create new issue
+bd update bd-a1b2 --status in_progress  # Claim work
+bd close bd-a1b2 --reason "Done"       # Complete issue
+bd sync                        # Force git sync
+```
+
+See `.claude/docs/beads-setup.md` for comprehensive documentation and AGENTS.md for workflow guidelines.
 
 ## Testing
 

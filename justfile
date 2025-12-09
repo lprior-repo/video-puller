@@ -109,3 +109,60 @@ mcp-reserve AGENT:
 # Run comprehensive development checks (includes nushell script)
 dev-check:
     nu scripts/dev.nu
+
+# Beads Commands
+# Show ready work (unblocked issues)
+beads-ready:
+    bd ready --json
+
+# Show all open issues
+beads-list:
+    bd list
+
+# Show database status
+beads-status:
+    bd status
+
+# Create a new issue (interactive)
+beads-create TITLE TYPE="task" PRIORITY="2":
+    bd create "{{TITLE}}" -t {{TYPE}} -p {{PRIORITY}} --json
+
+# Update issue status
+beads-update ID STATUS:
+    bd update {{ID}} --status {{STATUS}} --json
+
+# Close an issue
+beads-close ID REASON="Completed":
+    bd close {{ID}} --reason "{{REASON}}" --json
+
+# Show issue details
+beads-show ID:
+    bd show {{ID}} --json
+
+# Search issues
+beads-search QUERY:
+    bd search "{{QUERY}}"
+
+# Show dependency tree
+beads-deps ID:
+    bd dep tree {{ID}}
+
+# Show blocked issues
+beads-blocked:
+    bd blocked
+
+# Show stale issues (30 days)
+beads-stale:
+    bd stale --days 30
+
+# Force sync with git
+beads-sync:
+    bd sync
+
+# Run beads health check
+beads-doctor:
+    bd doctor
+
+# Validate database integrity
+beads-validate:
+    bd validate
