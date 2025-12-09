@@ -2,7 +2,6 @@
 ///
 /// Data access objects (DAOs) for CRUD operations on video_jobs table.
 /// All functions use prepared statements to prevent SQL injection.
-
 import domain/types.{type JobId, type VideoJob, type VideoStatus}
 import gleam/dynamic/decode
 import gleam/list
@@ -131,14 +130,12 @@ pub fn reset_zombies(conn: Db, updated_at: Int) -> Result(Int, DbError) {
     "UPDATE video_jobs SET status = 'pending', progress = 0, updated_at = ?
      WHERE status = 'downloading'"
 
-  use rows <- result.try(
-    db.query(
-      conn,
-      sql,
-      [sqlight.int(updated_at)],
-      decode.at([0], decode.int),
-    ),
-  )
+  use rows <- result.try(db.query(
+    conn,
+    sql,
+    [sqlight.int(updated_at)],
+    decode.at([0], decode.int),
+  ))
 
   // Return count of reset jobs
   Ok(list.length(rows))

@@ -2,7 +2,6 @@
 ///
 /// This module handles SQLite connections using sqlight,
 /// with proper WAL mode configuration for concurrency.
-
 import gleam/dynamic/decode
 import gleam/result
 import sqlight

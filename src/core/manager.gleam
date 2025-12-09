@@ -2,7 +2,6 @@
 ///
 /// Polls the database for pending jobs and dispatches them to downloader actors.
 /// Implements the core orchestration logic with configurable polling intervals.
-
 import domain/types.{type JobId, type ManagerMessage}
 import engine/downloader
 import engine/ytdlp

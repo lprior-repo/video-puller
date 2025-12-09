@@ -51,7 +51,13 @@ pub fn build_download_args_test() {
     )
   let job_id = types.new_job_id("test-123")
 
-  case ytdlp.build_download_args("https://youtube.com/watch?v=test", job_id, config) {
+  case
+    ytdlp.build_download_args(
+      "https://youtube.com/watch?v=test",
+      job_id,
+      config,
+    )
+  {
     Ok(args) -> {
       // Should contain the URL as last argument
       args

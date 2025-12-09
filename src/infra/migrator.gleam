@@ -2,7 +2,6 @@
 ///
 /// Handles running SQL migrations from the priv/migrations directory.
 /// Migrations are run in order and tracked to prevent re-running.
-
 import gleam/dynamic/decode
 import gleam/list
 import gleam/result
@@ -47,8 +46,7 @@ fn load_migration_files() -> Result(List(#(String, String)), DbError) {
         }
       })
     }
-    Error(_) ->
-      Error(db.MigrationError("Failed to read migrations directory"))
+    Error(_) -> Error(db.MigrationError("Failed to read migrations directory"))
   }
 }
 
@@ -64,7 +62,11 @@ fn run_migration_list(
 }
 
 /// Run a single migration if it hasn't been applied yet
-fn run_migration(conn: Db, filename: String, sql: String) -> Result(Nil, DbError) {
+fn run_migration(
+  conn: Db,
+  filename: String,
+  sql: String,
+) -> Result(Nil, DbError) {
   use already_applied <- result.try(is_migration_applied(conn, filename))
 
   case already_applied {
@@ -80,14 +82,12 @@ fn run_migration(conn: Db, filename: String, sql: String) -> Result(Nil, DbError
 fn is_migration_applied(conn: Db, filename: String) -> Result(Bool, DbError) {
   let sql = "SELECT COUNT(*) as count FROM schema_migrations WHERE version = ?"
 
-  use rows <- result.try(
-    db.query(
-      conn,
-      sql,
-      [sqlight.text(filename)],
-      decode.at([0], decode.int),
-    ),
-  )
+  use rows <- result.try(db.query(
+    conn,
+    sql,
+    [sqlight.text(filename)],
+    decode.at([0], decode.int),
+  ))
 
   case list.first(rows) {
     Ok(count) -> Ok(count > 0)
@@ -97,12 +97,16 @@ fn is_migration_applied(conn: Db, filename: String) -> Result(Bool, DbError) {
 
 /// Record that a migration has been applied
 fn record_migration(conn: Db, filename: String) -> Result(Nil, DbError) {
-  let sql =
-    "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)"
+  let sql = "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)"
 
   let timestamp = get_timestamp()
 
-  db.query(conn, sql, [sqlight.text(filename), sqlight.int(timestamp)], decode.at([0], decode.int))
+  db.query(
+    conn,
+    sql,
+    [sqlight.text(filename), sqlight.int(timestamp)],
+    decode.at([0], decode.int),
+  )
   |> result.replace_error(db.MigrationError(
     "Failed to record migration: " <> filename,
   ))

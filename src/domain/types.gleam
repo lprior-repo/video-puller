@@ -2,7 +2,6 @@
 ///
 /// This module defines the core types used throughout the application,
 /// following the schemas defined in the system specification.
-
 import gleam/option.{type Option}
 
 /// JobId - Unique identifier for a download job

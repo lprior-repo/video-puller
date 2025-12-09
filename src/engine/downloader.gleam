@@ -2,7 +2,6 @@
 ///
 /// OTP actor that handles individual video download jobs.
 /// Receives commands to start downloads and reports progress/completion.
-
 import domain/types.{type DownloadResult, type JobId}
 import engine/parser
 import engine/shell
@@ -52,10 +51,8 @@ fn handle_message(
       process.send(reply, result)
 
       // Update state to track current job
-      let new_state = DownloaderState(
-        config: state.config,
-        current_job: option.Some(job_id),
-      )
+      let new_state =
+        DownloaderState(config: state.config, current_job: option.Some(job_id))
       actor.continue(new_state)
     }
 

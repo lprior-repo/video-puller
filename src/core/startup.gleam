@@ -3,7 +3,6 @@
 /// Handles critical startup operations:
 /// - Running database migrations (INV-002: must run before app start)
 /// - Fixing zombie jobs (INV-003: revert processing jobs to pending)
-
 import envoy
 import gleam/int
 import gleam/io

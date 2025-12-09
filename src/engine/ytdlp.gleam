@@ -2,7 +2,6 @@
 ///
 /// Constructs safe yt-dlp commands with proper argument escaping.
 /// CRITICAL: All URL inputs must be validated (INV-001).
-
 import domain/types.{type JobId}
 import gleam/option.{None, Some}
 import gleam/result
@@ -11,11 +10,7 @@ import gleam/uri
 
 /// Configuration for yt-dlp downloads
 pub type DownloadConfig {
-  DownloadConfig(
-    output_directory: String,
-    format: String,
-    max_filesize: String,
-  )
+  DownloadConfig(output_directory: String, format: String, max_filesize: String)
 }
 
 /// Build yt-dlp command arguments for downloading a video

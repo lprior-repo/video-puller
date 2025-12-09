@@ -2,7 +2,6 @@
 ///
 /// Provides safe shell command execution using shellout.
 /// CRITICAL: All inputs must be sanitized to prevent shell injection (INV-001).
-
 import gleam/list
 import gleam/result
 import gleam/string
@@ -39,8 +38,7 @@ pub fn run(
     Error(e) -> Error(e)
     Ok(_) -> {
       case shellout.command(run: command, with: args, in: ".", opt: []) {
-        Ok(output) ->
-          Ok(ShellResult(exit_code: 0, stdout: output, stderr: ""))
+        Ok(output) -> Ok(ShellResult(exit_code: 0, stdout: output, stderr: ""))
         Error(#(code, stderr)) ->
           Ok(ShellResult(exit_code: code, stdout: "", stderr: stderr))
       }
@@ -56,7 +54,10 @@ pub fn run_simple(
   use result <- result.try(run(command, args))
   case result.exit_code {
     0 -> Ok(string.trim(result.stdout))
-    _ -> Error(ExecutionError("Command exited with code: " <> int_to_string(result.exit_code)))
+    _ ->
+      Error(ExecutionError(
+        "Command exited with code: " <> int_to_string(result.exit_code),
+      ))
   }
 }
 
@@ -69,9 +70,7 @@ fn validate_command(command: String) -> Result(Nil, ShellError) {
 
   case has_dangerous {
     True ->
-      Error(InvalidCommand(
-        "Command contains shell metacharacters: " <> command,
-      ))
+      Error(InvalidCommand("Command contains shell metacharacters: " <> command))
     False -> Ok(Nil)
   }
 }

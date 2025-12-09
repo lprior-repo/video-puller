@@ -2,7 +2,6 @@
 ///
 /// Parses yt-dlp progress output to extract download percentage and status.
 /// Uses regex to match progress patterns like "[download] 45.3% of 100.00MiB"
-
 import gleam/option.{Some}
 import gleam/regexp
 import gleam/string
@@ -50,14 +49,14 @@ pub fn parse_progress(line: String) -> Result(ProgressInfo, String) {
 /// Check if a line indicates download completion
 pub fn is_complete(line: String) -> Bool {
   string.contains(line, "[download] 100%")
-    || string.contains(line, "has already been downloaded")
+  || string.contains(line, "has already been downloaded")
 }
 
 /// Check if a line indicates an error
 pub fn is_error(line: String) -> Bool {
   string.contains(string.lowercase(line), "error:")
-    || string.contains(line, "ERROR:")
-    || string.contains(line, "Failed to")
+  || string.contains(line, "ERROR:")
+  || string.contains(line, "Failed to")
 }
 
 /// Extract error message from yt-dlp error output
