@@ -89,3 +89,23 @@ update:
 # Publish to Hex (requires proper configuration in gleam.toml)
 publish:
     gleam publish
+
+# Setup beads for the project
+setup-beads:
+    nu scripts/setup-beads.nu
+
+# Setup MCP agent-mail registration
+setup-mcp:
+    nu scripts/setup-mcp-agent.nu
+
+# Start MCP agent session
+mcp-start:
+    nu scripts/mcp-start-session.nu
+
+# Reserve files with MCP (requires AGENT parameter)
+mcp-reserve AGENT:
+    nu scripts/mcp-reserve-files.nu {{AGENT}}
+
+# Run comprehensive development checks (includes nushell script)
+dev-check:
+    nu scripts/dev.nu

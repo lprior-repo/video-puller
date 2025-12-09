@@ -1,8 +1,8 @@
 # Nushell Scripts
 
-This directory contains Nushell scripts for common development tasks.
+This directory contains Nushell scripts for common development tasks, including setup for beads and MCP agent coordination.
 
-## Available Scripts
+## Development Scripts
 
 ### `setup.nu`
 Initial setup for new developers. Downloads dependencies, builds the project, and runs tests.
@@ -45,6 +45,60 @@ Generate documentation and serve it locally on port 8000.
 ```bash
 nu scripts/docs-serve.nu
 ```
+
+## Setup & Integration Scripts
+
+### `setup-beads.nu`
+Set up Steve Yegge's beads system for this project. Guides you through installation and configuration.
+
+```bash
+nu scripts/setup-beads.nu
+```
+
+See `.claude/docs/beads-setup.md` for detailed documentation.
+
+### `setup-mcp-agent.nu`
+Display checklist and instructions for registering this project with the MCP agent-mail server.
+
+```bash
+nu scripts/setup-mcp-agent.nu --task "Feature development"
+```
+
+Options:
+- `--task`: Task description (default: "Gleam development")
+- `--program`: Program name (default: "claude-code")
+- `--model`: Model name (default: "sonnet-4.5")
+
+See `.claude/docs/mcp-agent-setup.md` for detailed documentation.
+
+## MCP Agent Coordination Scripts
+
+### `mcp-start-session.nu`
+Start an MCP agent-mail session with project registration and setup.
+
+```bash
+nu scripts/mcp-start-session.nu --task "Building authentication"
+```
+
+Options:
+- `--agent-name`: Specific agent name (leave empty to auto-generate)
+- `--task`: Task description
+
+### `mcp-reserve-files.nu`
+Reserve files in the MCP system to prevent concurrent edit conflicts.
+
+```bash
+nu scripts/mcp-reserve-files.nu YourAgentName \
+  --exclusive=true \
+  --ttl=7200 \
+  --reason="Feature development"
+```
+
+Parameters:
+- `agent_name`: Your agent name (required)
+- `--exclusive`: Exclusive reservation (default: true)
+- `--ttl`: Time to live in seconds (default: 7200 = 2 hours)
+- `--reason`: Reason for reservation (default: "Development work")
 
 ## Requirements
 

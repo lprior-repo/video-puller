@@ -90,6 +90,7 @@ video-puller/
 
 This project is optimized for use with Claude Code. Available slash commands:
 
+### Development Commands
 - `/test` - Run tests and fix failures
 - `/build` - Build and fix compilation errors
 - `/format` - Format all code
@@ -98,6 +99,11 @@ This project is optimized for use with Claude Code. Available slash commands:
 - `/refactor` - Refactor to idiomatic Gleam
 - `/deps` - Analyze dependencies
 - `/ci` - Run all CI checks
+
+### Setup & Integration Commands
+- `/setup-beads` - Research and set up Steve Yegge's beads system
+- `/setup-mcp-agent` - Research and register project with MCP agent-mail server
+- `/research` - Conduct thorough research on any topic
 
 See `.claude/commands/` for all available commands.
 
@@ -108,8 +114,36 @@ This project supports Model Context Protocol for agent coordination:
 - **Agent Mail**: Coordinate between multiple AI agents
 - **File Reservations**: Prevent edit conflicts
 - **Message Threading**: Organize agent communications
+- **Build Slots**: Manage concurrent build operations
 
-See `.claude/mcp/README.md` for setup instructions.
+### Quick Start with MCP
+
+```bash
+# Display setup checklist
+just setup-mcp
+
+# Start an MCP session (use in Claude Code)
+just mcp-start
+
+# Reserve files for editing
+just mcp-reserve YourAgentName
+```
+
+See `.claude/docs/mcp-agent-setup.md` for comprehensive setup instructions.
+
+## Beads Integration
+
+Support for Steve Yegge's beads system:
+
+```bash
+# Research and set up beads
+just setup-beads
+
+# Or use the slash command
+/setup-beads
+```
+
+See `.claude/docs/beads-setup.md` for detailed documentation.
 
 ## Testing
 
