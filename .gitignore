@@ -1,0 +1,27 @@
+# Gleam
+*.beam
+*.ez
+/build
+erl_crash.dump
+
+# Editor and IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Dependencies
+/deps
+/_build
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
