@@ -6,10 +6,13 @@
 /// - BEAM-native scheduling (no infinite recursion)
 /// - Backpressure awareness
 /// - Graceful degradation under load
+/// - Graceful shutdown with configurable timeout
 import core/pool_types.{type WorkerPoolSubject}
 import core/worker_pool
 import domain/core_types
-import domain/types.{type JobId, type ManagerMessage, SetSelf, SetWorkerPool}
+import domain/types.{
+  type JobId, type ManagerMessage, ForceShutdown, SetSelf, SetWorkerPool,
+}
 import engine/ytdlp
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
@@ -37,6 +40,9 @@ pub opaque type ManagerState {
     self: Option(Subject(ManagerMessage)),
     // Statistics for monitoring
     stats: core_types.ManagerStats,
+    // Graceful shutdown support
+    is_shutting_down: Bool,
+    shutdown_timeout_ms: Int,
   )
 }
 
@@ -67,6 +73,8 @@ pub fn start(
         total_failed: 0,
         polls_executed: 0,
       ),
+      is_shutting_down: False,
+      shutdown_timeout_ms: 30_000,
     )
 
   actor.start(
@@ -159,9 +167,28 @@ fn handle_message(
         False -> #(state.active_downloads, state.stats)
       }
 
-      actor.continue(
-        ManagerState(..state, active_downloads: new_active, stats: new_stats),
-      )
+      let new_state =
+        ManagerState(..state, active_downloads: new_active, stats: new_stats)
+
+      // If shutting down and all downloads complete, shutdown now
+      case new_state.is_shutting_down, dict.size(new_state.active_downloads) {
+        True, 0 -> {
+          io.println(
+            "✅ All in-flight downloads complete, shutting down gracefully",
+          )
+          shutdown_immediately(new_state)
+          actor.stop()
+        }
+        True, n -> {
+          io.println(
+            "⏳ Still waiting for "
+            <> int.to_string(n)
+            <> " download(s) to complete...",
+          )
+          actor.continue(new_state)
+        }
+        False, _ -> actor.continue(new_state)
+      }
     }
 
     types.UpdateProgress(job_id, progress) -> {
@@ -177,14 +204,59 @@ fn handle_message(
     }
 
     types.Shutdown -> {
-      io.println("🛑 Manager shutting down...")
+      io.println("🛑 Manager initiating graceful shutdown...")
 
-      // Shutdown worker pool gracefully
-      case state.worker_pool {
-        Some(pool) -> process.send(pool, pool_types.Shutdown)
-        None -> Nil
+      // Mark as shutting down to stop accepting new jobs
+      let new_state = ManagerState(..state, is_shutting_down: True)
+
+      // Check if we have in-flight downloads
+      let active_count = dict.size(new_state.active_downloads)
+
+      case active_count {
+        0 -> {
+          // No in-flight downloads, shutdown immediately
+          io.println("✅ No in-flight downloads, shutting down immediately")
+          shutdown_immediately(new_state)
+          actor.stop()
+        }
+        n -> {
+          // Wait for in-flight downloads to complete
+          io.println(
+            "⏳ Waiting for "
+            <> int.to_string(n)
+            <> " in-flight download(s) to complete...",
+          )
+
+          // Schedule a force shutdown after timeout
+          case new_state.self {
+            Some(self) -> {
+              schedule_force_shutdown(self, new_state.shutdown_timeout_ms)
+            }
+            None -> Nil
+          }
+
+          // Continue running but don't accept new jobs
+          actor.continue(new_state)
+        }
+      }
+    }
+
+    ForceShutdown -> {
+      io.println("⚠️  Force shutdown triggered after timeout")
+      let active_count = dict.size(state.active_downloads)
+
+      case active_count > 0 {
+        True -> {
+          io.println(
+            "⚠️  Forcing shutdown with "
+            <> int.to_string(active_count)
+            <> " download(s) still in progress",
+          )
+        }
+        False -> Nil
       }
 
+      shutdown_immediately(state)
       actor.stop()
     }
 
@@ -207,59 +279,74 @@ fn handle_message(
 
 /// Poll database and dispatch pending jobs to worker pool
 fn poll_and_dispatch(state: ManagerState) -> ManagerState {
-  // Check if we can accept more jobs
-  let active_count = dict.size(state.active_downloads)
-  let available_slots = state.max_concurrency - active_count
+  // Don't accept new jobs if shutting down
+  case state.is_shutting_down {
+    True -> state
+    False -> {
+      // Check if we can accept more jobs
+      let active_count = dict.size(state.active_downloads)
+      let available_slots = state.max_concurrency - active_count
 
-  case available_slots > 0, state.worker_pool {
-    False, _ -> state
-    _, None -> {
-      // No worker pool - use fallback dispatch
-      fallback_dispatch(state, available_slots)
-    }
-    True, Some(pool) -> {
-      // Get pending jobs
-      case repo.list_jobs(state.db, Some("pending")) {
-        Ok(jobs) -> {
-          let jobs_to_start =
-            jobs
-            |> list.take(available_slots)
-
-          // Submit jobs to worker pool
-          let #(new_active, dispatched_count) =
-            list.fold(jobs_to_start, #(state.active_downloads, 0), fn(acc, job) {
-              let #(active, count) = acc
-
-              // Submit to worker pool
-              process.send(pool, pool_types.SubmitJob(job.id, job.url))
-
-              io.println(
-                "📤 Submitted to pool: "
-                <> types.job_id_to_string(job.id)
-                <> " - "
-                <> job.url,
-              )
-
-              // Track as active
-              let job_id_str = types.job_id_to_string(job.id)
-              let download =
-                ActiveDownload(
-                  job_id: job.id,
-                  url: job.url,
-                  started_at: get_timestamp(),
-                )
-              #(dict.insert(active, job_id_str, download), count + 1)
-            })
-
-          let new_stats =
-            core_types.ManagerStats(
-              ..state.stats,
-              total_dispatched: state.stats.total_dispatched + dispatched_count,
-            )
-
-          ManagerState(..state, active_downloads: new_active, stats: new_stats)
+      case available_slots > 0, state.worker_pool {
+        False, _ -> state
+        _, None -> {
+          // No worker pool - use fallback dispatch
+          fallback_dispatch(state, available_slots)
         }
-        Error(_) -> state
+        True, Some(pool) -> {
+          // Get pending jobs
+          case repo.list_jobs(state.db, Some("pending")) {
+            Ok(jobs) -> {
+              let jobs_to_start =
+                jobs
+                |> list.take(available_slots)
+
+              // Submit jobs to worker pool
+              let #(new_active, dispatched_count) =
+                list.fold(
+                  jobs_to_start,
+                  #(state.active_downloads, 0),
+                  fn(acc, job) {
+                    let #(active, count) = acc
+
+                    // Submit to worker pool
+                    process.send(pool, pool_types.SubmitJob(job.id, job.url))
+
+                    io.println(
+                      "📤 Submitted to pool: "
+                      <> types.job_id_to_string(job.id)
+                      <> " - "
+                      <> job.url,
+                    )
+
+                    // Track as active
+                    let job_id_str = types.job_id_to_string(job.id)
+                    let download =
+                      ActiveDownload(
+                        job_id: job.id,
+                        url: job.url,
+                        started_at: get_timestamp(),
+                      )
+                    #(dict.insert(active, job_id_str, download), count + 1)
+                  },
+                )
+
+              let new_stats =
+                core_types.ManagerStats(
+                  ..state.stats,
+                  total_dispatched: state.stats.total_dispatched
+                    + dispatched_count,
+                )
+
+              ManagerState(
+                ..state,
+                active_downloads: new_active,
+                stats: new_stats,
+              )
+            }
+            Error(_) -> state
+          }
+        }
       }
     }
   }
@@ -367,6 +454,25 @@ fn run_download_fallback(
 /// This is the KEY improvement over infinite recursion!
 fn schedule_poll(manager: Subject(ManagerMessage), interval_ms: Int) -> Nil {
   process.send_after(manager, interval_ms, types.PollJobs)
+  Nil
+}
+
+/// Schedule force shutdown after timeout
+fn schedule_force_shutdown(
+  manager: Subject(ManagerMessage),
+  timeout_ms: Int,
+) -> Nil {
+  process.send_after(manager, timeout_ms, ForceShutdown)
+  Nil
+}
+
+/// Shutdown immediately by stopping worker pool
+fn shutdown_immediately(state: ManagerState) -> Nil {
+  // Shutdown worker pool gracefully
+  case state.worker_pool {
+    Some(pool) -> process.send(pool, pool_types.Shutdown)
+    None -> Nil
+  }
   Nil
 }
 

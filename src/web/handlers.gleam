@@ -11,18 +11,53 @@ import gleam/erlang/process
 import gleam/http/request
 import gleam/int
 import gleam/io
+import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
+import infra/db
 import infra/repo
 import infra/subscription_repo
 import lustre/attribute.{class}
 import lustre/element.{type Element, text}
 import lustre/element/html.{a, div, h2, li, p, ul}
-import web/middleware.{type Context, html_response, redirect}
+import web/middleware.{type Context, html_response, json_response, redirect}
 import web/templates
 import wisp.{type Request, type Response}
+
+/// Health endpoint - returns server status with database connectivity check
+pub fn health(_req: Request, ctx: Context) -> Response {
+  // Check database connectivity by running a simple query
+  case check_database_connection(ctx.db) {
+    Ok(_) -> {
+      let body =
+        json.object([
+          #("status", json.string("ok")),
+          #("database", json.string("connected")),
+        ])
+        |> json.to_string
+
+      json_response(200, body)
+    }
+    Error(_) -> {
+      let body =
+        json.object([
+          #("status", json.string("error")),
+          #("database", json.string("disconnected")),
+        ])
+        |> json.to_string
+
+      json_response(503, body)
+    }
+  }
+}
+
+/// Check database connectivity by executing a simple query
+fn check_database_connection(conn: db.Db) -> Result(Nil, db.DbError) {
+  // Try to execute a simple query to verify database connectivity
+  db.exec_raw(conn, "SELECT 1")
+}
 
 /// Dashboard handler - shows list of all jobs
 pub fn dashboard(_req: Request, ctx: Context) -> Response {

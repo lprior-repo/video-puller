@@ -16,6 +16,9 @@ pub fn handle_request(req: Request, ctx: Context) -> Response {
 /// Route dispatcher
 fn route(req: Request, ctx: Context) -> Response {
   case req.method, wisp.path_segments(req) {
+    // Health endpoint
+    http.Get, ["health"] -> handlers.health(req, ctx)
+
     // Dashboard (home page)
     http.Get, [] -> handlers.dashboard(req, ctx)
     http.Get, ["dashboard"] -> handlers.dashboard(req, ctx)

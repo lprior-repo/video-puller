@@ -27,6 +27,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
+import simplifile
 
 /// Worker pool state
 pub opaque type WorkerPoolState {
@@ -227,22 +228,53 @@ fn handle_pool_message(
         <> job_id_to_string(job_id),
       )
 
-      // Update stats
-      let new_stats =
-        PoolStats(
-          ..state.stats,
-          total_completed: state.stats.total_completed + 1,
-        )
-
       // Get the worker subject from busy_workers
       case dict.get(state.busy_workers, worker_id) {
         Ok(info) -> {
-          // Notify manager of completion
-          let status = case result {
-            DownloadComplete(_, _) -> Completed
-            DownloadFailed(_, reason) -> Failed(reason)
-            _ -> Completed
+          // Verify the download result and check file existence
+          let #(status, stats_update) = case result {
+            DownloadComplete(_, path) -> {
+              // CRITICAL: Check if file actually exists before marking as completed
+              // yt-dlp can return exit code 0 even when no file was downloaded
+              case verify_file_exists(path, job_id, state.config) {
+                Ok(actual_path) -> {
+                  io.println("✓ File verified at: " <> actual_path)
+                  #(
+                    Completed,
+                    PoolStats(
+                      ..state.stats,
+                      total_completed: state.stats.total_completed + 1,
+                    ),
+                  )
+                }
+                Error(reason) -> {
+                  io.println("⚠️  File verification failed: " <> reason)
+                  #(
+                    Failed(reason),
+                    PoolStats(
+                      ..state.stats,
+                      total_failed: state.stats.total_failed + 1,
+                    ),
+                  )
+                }
+              }
+            }
+            DownloadFailed(_, reason) -> {
+              #(
+                Failed(reason),
+                PoolStats(
+                  ..state.stats,
+                  total_failed: state.stats.total_failed + 1,
+                ),
+              )
+            }
+            _ -> {
+              // Unknown result type - mark as completed but don't update stats
+              #(Completed, state.stats)
+            }
           }
+
+          // Notify manager of final status
           process.send(state.manager_subject, JobStatusUpdate(job_id, status))
 
           // Return worker to available pool
@@ -255,7 +287,7 @@ fn handle_pool_message(
               ..state,
               available_workers: new_available,
               busy_workers: new_busy,
-              stats: new_stats,
+              stats: stats_update,
             )
 
           case state.self {
@@ -267,7 +299,7 @@ fn handle_pool_message(
         }
         Error(_) -> {
           // Worker not in busy list - ignore
-          actor.continue(WorkerPoolState(..state, stats: new_stats))
+          actor.continue(state)
         }
       }
     }
@@ -606,6 +638,8 @@ fn assign_work_to_worker(
 ) -> Nil {
   case pool {
     Some(p) -> {
+      // Notify manager that job is now downloading
+      process.send(manager, JobStatusUpdate(job_id, core_types.Downloading(0)))
       process.send(worker, ExecuteDownload(job_id, url, worker_id, p, manager))
     }
     None -> Nil
@@ -621,6 +655,65 @@ fn schedule_health_check(pool: Subject(PoolMessage)) -> Nil {
       process.send(pool, HealthCheck)
     })
   Nil
+}
+
+/// Verify that a downloaded file actually exists
+///
+/// This is critical because yt-dlp can return exit code 0 (success) even when:
+/// - The file already existed and was skipped
+/// - The download was filtered by size/format
+/// - The video is geo-blocked or unavailable
+/// - The file was partially downloaded then removed
+fn verify_file_exists(
+  _path: String,
+  job_id: JobId,
+  config: ytdlp.DownloadConfig,
+) -> Result(String, String) {
+  // The path from downloader might be a placeholder or directory
+  // We need to check for actual files with the job_id prefix
+  let job_id_str = job_id_to_string(job_id)
+
+  // Common video extensions yt-dlp might use
+  let extensions = [
+    ".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".opus", ".flac", ".wav", ".avi",
+    ".mov", ".wmv", ".flv", ".f4v", ".3gp", ".ts", ".m4v",
+  ]
+
+  // Try to find the actual file by checking common extensions
+  let potential_files =
+    list.map(extensions, fn(ext) {
+      config.output_directory <> "/" <> job_id_str <> ext
+    })
+
+  // Find first existing file
+  case
+    list.find(potential_files, fn(file_path) {
+      case simplifile.is_file(file_path) {
+        Ok(True) -> True
+        _ -> False
+      }
+    })
+  {
+    Ok(found_path) -> {
+      // Verify file is not empty (catch partial downloads)
+      case simplifile.file_info(found_path) {
+        Ok(_info) -> {
+          // File exists and we got info, assume it's valid
+          // Note: simplifile.FileInfo doesn't have a size field in the public API
+          // We just check that file_info succeeds
+          Ok(found_path)
+        }
+        Error(_) -> Ok(found_path)
+        // If we can't get info but file exists, assume OK
+      }
+    }
+    Error(_) -> {
+      // No file found with expected extensions
+      Error(
+        "Download reported success but no output file found (file may already exist, be filtered, or download failed)",
+      )
+    }
+  }
 }
 
 /// Get current Unix timestamp in nanoseconds

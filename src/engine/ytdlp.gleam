@@ -9,6 +9,16 @@ import gleam/result
 import gleam/string
 import gleam/uri
 
+/// Common arguments needed for YouTube JS challenge solving
+/// These are required for yt-dlp to work reliably with YouTube as of late 2025
+fn youtube_js_args() -> List(String) {
+  [
+    // Enable remote EJS challenge solver from GitHub
+    "--remote-components",
+    "ejs:github",
+  ]
+}
+
 /// Audio format options for audio-only downloads
 pub type AudioFormat {
   MP3
@@ -79,8 +89,16 @@ pub fn build_download_args(
     False -> ["--no-playlist"]
   }
 
-  // Combine all args and add URL last
-  Ok(list.flatten([base_args, format_args, playlist_args, [url]]))
+  // Combine all args: JS runtime args first, then base args, format, playlist, and URL last
+  Ok(
+    list.flatten([
+      youtube_js_args(),
+      base_args,
+      format_args,
+      playlist_args,
+      [url],
+    ]),
+  )
 }
 
 /// Build audio extraction arguments
@@ -108,21 +126,24 @@ fn build_audio_args(audio_format: AudioFormat) -> List(String) {
 pub fn build_info_args(url: String) -> Result(List(String), String) {
   use _ <- result.try(validate_url(url))
 
-  Ok([
-    "--dump-json",
-    "--no-playlist",
-    url,
-  ])
+  Ok(
+    list.flatten([
+      youtube_js_args(),
+      ["--dump-json", "--no-playlist", url],
+    ]),
+  )
 }
 
 /// Build yt-dlp command to list available formats for a video
 pub fn build_list_formats_args(url: String) -> Result(List(String), String) {
   use _ <- result.try(validate_url(url))
 
-  Ok([
-    "-F",
-    url,
-  ])
+  Ok(
+    list.flatten([
+      youtube_js_args(),
+      ["-F", url],
+    ]),
+  )
 }
 
 /// Validate that a URL is safe and well-formed
@@ -178,12 +199,12 @@ pub fn audio_config(format: AudioFormat) -> DownloadConfig {
 pub fn build_playlist_info_args(url: String) -> Result(List(String), String) {
   use _ <- result.try(validate_url(url))
 
-  Ok([
-    "--dump-json",
-    "--flat-playlist",
-    "--yes-playlist",
-    url,
-  ])
+  Ok(
+    list.flatten([
+      youtube_js_args(),
+      ["--dump-json", "--flat-playlist", "--yes-playlist", url],
+    ]),
+  )
 }
 
 /// Convert AudioFormat to string

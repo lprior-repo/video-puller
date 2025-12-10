@@ -10,9 +10,12 @@ import engine/parser
 import engine/shell
 import engine/ytdlp
 import gleam/erlang/process.{type Subject}
+import gleam/list
 import gleam/option.{type Option}
 import gleam/otp/actor
 import gleam/result
+import gleam/string
+import simplifile
 
 /// Actor state for the downloader
 pub type DownloaderState {
@@ -41,6 +44,27 @@ pub fn start(
     |> actor.on_message(handle_message),
   )
   |> result.map(fn(started) { started.data })
+}
+
+/// Check if a downloaded file exists for the given job_id
+/// Returns the full path if found, or Error if no file exists
+fn find_downloaded_file(
+  job_id: JobId,
+  output_directory: String,
+) -> Result(String, Nil) {
+  let job_id_str = core_types.job_id_to_string(job_id)
+
+  // Read directory contents
+  case simplifile.read_directory(output_directory) {
+    Ok(files) -> {
+      // Look for files that start with the job_id
+      files
+      |> list.filter(fn(filename) { string.starts_with(filename, job_id_str) })
+      |> list.first
+      |> result.map(fn(filename) { output_directory <> "/" <> filename })
+    }
+    Error(_) -> Error(Nil)
+  }
 }
 
 /// Handle messages sent to the downloader actor
@@ -97,12 +121,31 @@ fn execute_download_streaming(
         Ok(exit_code) -> {
           case exit_code {
             0 -> {
-              // Success - use configured output directory
-              let path = config.output_directory <> "/download_complete"
-              DownloadComplete(job_id, path)
+              // Exit code 0 - check for downloaded file
+              case find_downloaded_file(job_id, config.output_directory) {
+                Ok(path) -> DownloadComplete(job_id, path)
+                Error(_) -> {
+                  // Exit code 0 but no file found - unexpected
+                  DownloadFailed(
+                    job_id,
+                    "Download reported success but file not found",
+                  )
+                }
+              }
             }
             _ -> {
-              DownloadFailed(job_id, "Download failed with exit code")
+              // Non-zero exit code - check if file exists anyway
+              // yt-dlp returns exit code 1 for warnings even when download succeeds
+              case find_downloaded_file(job_id, config.output_directory) {
+                Ok(path) -> {
+                  // File exists despite non-zero exit code - treat as success
+                  DownloadComplete(job_id, path)
+                }
+                Error(_) -> {
+                  // No file found - genuine failure
+                  DownloadFailed(job_id, "Download failed with exit code")
+                }
+              }
             }
           }
         }

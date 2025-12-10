@@ -219,6 +219,29 @@ pub fn reset_zombies(conn: Db, updated_at: Int) -> Result(Int, DbError) {
   Ok(zombie_count)
 }
 
+/// Get a single job by ID
+pub fn get_job(conn: Db, job_id: JobId) -> Result(Option(VideoJob), DbError) {
+  let id_str = job_id_to_string(job_id)
+
+  let query =
+    select.new()
+    |> select.from_table("video_jobs")
+    |> select.select_cols([
+      "id", "url", "status", "progress", "path", "error_message", "title",
+      "thumbnail_url", "duration_seconds", "format_code", "created_at",
+      "updated_at",
+    ])
+    |> select.where(where.eq(where.col("id"), where.string(id_str)))
+    |> select.to_query()
+
+  use rows <- result.try(db.run_read(conn, query, video_job_decoder()))
+
+  Ok(case list.first(rows) {
+    Ok(job) -> option.Some(job)
+    Error(_) -> option.None
+  })
+}
+
 /// Decoder for VideoJob from database row
 fn video_job_decoder() -> decode.Decoder(VideoJob) {
   use id <- decode.then(decode.at([0], decode.string))
@@ -226,7 +249,10 @@ fn video_job_decoder() -> decode.Decoder(VideoJob) {
   use status <- decode.then(decode.at([2], decode.string))
   use progress <- decode.then(decode.at([3], decode.int))
   use path <- decode.then(decode.at([4], decode.optional(decode.string)))
-  use _error <- decode.then(decode.at([5], decode.optional(decode.string)))
+  use error_message <- decode.then(decode.at(
+    [5],
+    decode.optional(decode.string),
+  ))
   use title <- decode.then(decode.at([6], decode.optional(decode.string)))
   use thumbnail_url <- decode.then(decode.at(
     [7],
@@ -240,10 +266,11 @@ fn video_job_decoder() -> decode.Decoder(VideoJob) {
   use created_at <- decode.then(decode.at([10], decode.int))
   use updated_at <- decode.then(decode.at([11], decode.int))
 
-  let video_status = case status, progress {
-    "downloading", p -> core_types.Downloading(p)
+  let video_status = case status, error_message {
+    "downloading", _ -> core_types.Downloading(progress)
     "completed", _ -> core_types.Completed
-    "failed", _ -> core_types.Failed("Download failed")
+    "failed", Some(msg) -> core_types.Failed(msg)
+    "failed", None -> core_types.Failed("Unknown error")
     _, _ -> core_types.Pending
   }
 

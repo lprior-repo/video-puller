@@ -40,6 +40,7 @@ pub type ManagerMessage {
   JobStatusUpdate(job_id: core_types.JobId, status: core_types.VideoStatus)
   UpdateProgress(job_id: core_types.JobId, progress: Int)
   Shutdown
+  ForceShutdown
   SetSelf(Subject(ManagerMessage))
   // Worker pool integration - properly typed
   SetWorkerPool(pool: WorkerPoolSubject)

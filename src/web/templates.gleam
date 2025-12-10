@@ -19,7 +19,8 @@ import lustre/attribute.{attribute, class, href, name, placeholder, type_}
 import lustre/element.{type Element, text}
 import lustre/element/html.{
   a, body, button, details, div, form, h1, h2, head, html, input, label, li,
-  link, main, meta, nav, option, p, select, span, style, summary, title, ul,
+  link, main, meta, nav, option, p, script, select, span, style, summary, title,
+  ul,
 }
 
 /// Base HTML layout wrapper
@@ -591,9 +592,23 @@ pub fn dashboard_page(
 
 /// Queue page content - shows pending jobs only
 pub fn queue_page(jobs: List(VideoJob)) -> Element(a) {
+  // Check if there are any downloading jobs to enable auto-refresh
+  let has_downloading =
+    list.any(jobs, fn(job) {
+      case job.status {
+        Downloading(_) -> True
+        _ -> False
+      }
+    })
+
   div([], [
     h2([class("text-2xl font-bold mb-6")], [text("Download Queue")]),
     queue_list(jobs),
+    // Auto-refresh script when there are active downloads
+    case has_downloading {
+      True -> script([], "setTimeout(function() { location.reload(); }, 3000);")
+      False -> div([], [])
+    },
   ])
 }
 
