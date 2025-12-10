@@ -5,6 +5,9 @@
 import domain/core_types.{
   type FormatOption, type VideoMetadata, FormatOption, VideoMetadata,
 }
+import gleam/dynamic/decode
+import gleam/float
+import gleam/json
 import gleam/list
 import gleam/option.{type Option, Some}
 import gleam/regexp
@@ -240,9 +243,10 @@ pub fn extract_error(line: String) -> String {
   }
 }
 
-/// Simple float parsing using Erlang FFI
-@external(erlang, "parser_ffi", "parse_float")
-fn parse_float_string(str: String) -> Result(Float, Nil)
+/// Simple float parsing using Gleam's built-in float parser
+fn parse_float_string(str: String) -> Result(Float, Nil) {
+  float.parse(str)
+}
 
 /// Round a float to nearest integer
 @external(erlang, "erlang", "round")
@@ -307,23 +311,28 @@ fn parse_format_line(line: String) -> Result(FormatOption, Nil) {
 ///
 /// Returns: Result(VideoMetadata, String) with error message on failure
 pub fn parse_video_info(json_string: String) -> Result(VideoMetadata, String) {
-  // Use Erlang FFI which handles JSON parsing and field extraction
-  case parse_video_metadata_ffi(json_string) {
-    Ok(#(title, thumbnail, duration, uploader, view_count)) ->
-      Ok(VideoMetadata(
-        title: title,
-        thumbnail: thumbnail,
-        duration: duration,
-        uploader: uploader,
-        view_count: view_count,
-      ))
-    Error(err_msg) -> Error(err_msg)
+  // Parse the JSON string using gleam/json and decode using gleam/dynamic/decode
+  case json.parse(json_string, video_metadata_decoder()) {
+    Ok(metadata) -> Ok(metadata)
+    Error(_) -> Error("Failed to decode video metadata JSON")
   }
 }
 
-/// Parse video metadata using Erlang FFI
-/// Returns tuple of (title, thumbnail, duration, uploader, view_count)
-@external(erlang, "parser_ffi", "parse_video_metadata")
-fn parse_video_metadata_ffi(
-  json_string: String,
-) -> Result(#(String, String, Int, String, Option(Int)), String)
+/// Decoder for video metadata JSON using gleam/dynamic/decode
+fn video_metadata_decoder() -> decode.Decoder(VideoMetadata) {
+  use title <- decode.then(decode.at(["title"], decode.string))
+  use thumbnail <- decode.then(decode.at(["thumbnail"], decode.string))
+  use duration <- decode.then(decode.at(["duration"], decode.int))
+  use uploader <- decode.then(decode.at(["uploader"], decode.string))
+  use view_count <- decode.then(
+    decode.optional(decode.at(["view_count"], decode.int)),
+  )
+
+  decode.success(VideoMetadata(
+    title: title,
+    thumbnail: thumbnail,
+    duration: duration,
+    uploader: uploader,
+    view_count: view_count,
+  ))
+}

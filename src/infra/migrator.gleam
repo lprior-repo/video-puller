@@ -7,9 +7,11 @@ import cake/insert
 import cake/select
 import cake/where
 import gleam/dynamic/decode
+import gleam/erlang
 import gleam/list
 import gleam/result
 import gleam/string
+import gleam_time
 import infra/db.{type Db, type DbError}
 import simplifile
 
@@ -118,15 +120,20 @@ fn record_migration(conn: Db, filename: String) -> Result(Nil, DbError) {
   |> result.replace(Nil)
 }
 
-/// Get current Unix timestamp
-@external(erlang, "os", "system_time")
-fn get_timestamp() -> Int
+/// Get current Unix timestamp in seconds
+fn get_timestamp() -> Int {
+  gleam_time.now_utc()
+  |> gleam_time.to_unix_utc()
+}
 
-/// Get the path to the migrations directory
-/// In development, uses priv/migrations
-/// In release, uses the Erlang application priv directory
-@external(erlang, "video_puller_ffi", "priv_directory")
-fn get_priv_directory(app: String) -> String
+/// Get the priv directory for the application
+/// Returns empty string on error (for fallback to development path)
+fn get_priv_directory(app: String) -> String {
+  case erlang.priv_directory(app) {
+    Ok(path) -> path
+    Error(_) -> ""
+  }
+}
 
 fn get_migrations_path() -> String {
   // Try to use Erlang's code:priv_dir first (for releases)

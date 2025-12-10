@@ -3,7 +3,7 @@
 /// Handles critical startup operations:
 /// - Running database migrations (INV-002: must run before app start)
 /// - Fixing zombie jobs (INV-003: revert processing jobs to pending)
-import envoy
+import gleam/erlang/os
 import gleam/int
 import gleam/io
 import gleam/result
@@ -16,7 +16,7 @@ pub fn initialize() -> Result(Db, DbError) {
   io.println("🚀 Starting FractalVideoEater...")
 
   // Get database path from environment or use default
-  let db_path = case envoy.get("DB_PATH") {
+  let db_path = case os.get_env("DB_PATH") {
     Ok(path) -> path
     Error(_) -> "./data/video_eater.db"
   }

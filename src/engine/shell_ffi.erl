@@ -46,7 +46,8 @@ do_open_port(ExecutableChars, Args) ->
 %% Returns Gleam StreamLine type:
 %% {output_line, Binary} | end_of_stream | {process_exit, Int} | {stream_error, Binary}
 read_line(Port) ->
-    read_line_timeout(Port, 5000).
+    %% 5 minutes timeout - yt-dlp can be slow (metadata fetch, rate limiting, etc.)
+    read_line_timeout(Port, 300000).
 
 read_line_timeout(Port, Timeout) ->
     receive

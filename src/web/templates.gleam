@@ -863,20 +863,14 @@ fn truncate_url(url: String, max_len: Int) -> String {
   case max_len {
     n if n < 0 -> url
     _ -> {
-      let len = string_length(url)
+      let len = string.length(url)
       case len > max_len {
-        True -> string_slice(url, 0, max_len - 3) <> "..."
+        True -> string.slice(url, 0, max_len - 3) <> "..."
         False -> url
       }
     }
   }
 }
-
-@external(erlang, "string", "length")
-fn string_length(s: String) -> Int
-
-@external(erlang, "string", "slice")
-fn string_slice(s: String, start: Int, length: Int) -> String
 
 /// Status badge component
 fn status_badge(status: VideoStatus) -> Element(a) {
