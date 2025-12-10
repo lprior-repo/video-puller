@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GleanDown - Video Downloader</title>
+    <style>
+        /* Define the bold colors and fonts */
+        :root {
+            --color-black: #000000;
+            --color-surface: #121215; /* Near-black for cards */
+            --color-accent-pink: #FF00A0; /* Neon Pink */
+            --color-text-light: #F0F0F0;
+            --font-display: 'Inter', sans-serif;
+            --border-radius: 4px;
+        }
+
+        /* Global Reset and Body Style */
+        body {
+            background-color: var(--color-black);
+            color: var(--color-text-light);
+            font-family: var(--font-display);
+            margin: 0;
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* Left Navigation (The Razor Strip) */
+        .nav-sidebar {
+            width: 15%;
+            background-color: #08080C; /* Slightly darker than surface */
+            padding: 20px 0;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid rgba(255, 0, 160, 0.1);
+        }
+
+        .nav-item {
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            font-weight: 500;
+        }
+
+        .nav-item.active {
+            color: var(--color-accent-pink);
+            background-color: rgba(255, 0, 160, 0.15); /* Pink highlight */
+            border-left: 3px solid var(--color-accent-pink);
+            /* Icon would glow here using text-shadow in a real app */
+        }
+
+        /* Main Content Area */
+        .main-content {
+            flex-grow: 1;
+            padding: 20px;
+        }
+
+        /* Section Cards (Floating) */
+        .card {
+            background-color: var(--color-surface);
+            padding: 30px;
+            margin-bottom: 25px;
+            border-radius: var(--border-radius);
+            box-shadow: 0 0 10px rgba(255, 0, 160, 0.05); /* Subtle pink lift */
+        }
+
+        /* GLEAN IT Headline */
+        .headline-section h1 {
+            font-size: 3em;
+            font-weight: 900;
+            margin-bottom: 5px;
+        }
+
+        .headline-section h1 .glean-word {
+            color: var(--color-accent-pink);
+            text-shadow: 0 0 8px var(--color-accent-pink); /* Neon Glow on the word */
+        }
+
+        /* Input Field Styling */
+        .url-input {
+            width: 90%;
+            padding: 15px 20px;
+            font-size: 1.1em;
+            background-color: #000000; /* Pure black field */
+            color: var(--color-text-light);
+            border: 2px solid #222;
+            border-radius: var(--border-radius);
+            margin-top: 20px;
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+
+        .url-input:focus {
+            outline: none;
+            border-color: var(--color-accent-pink);
+            /* Aggressive Pink Neon Glow on Focus */
+            box-shadow: 0 0 15px var(--color-accent-pink), 0 0 25px rgba(255, 0, 160, 0.5);
+        }
+
+        /* Primary CTA Button */
+        .cta-button {
+            background-color: var(--color-accent-pink);
+            color: var(--color-black); /* Dark text on bright button */
+            font-weight: 900;
+            font-size: 1.5em;
+            padding: 15px 40px;
+            border: none;
+            cursor: pointer;
+            text-transform: uppercase;
+            border-radius: 0; /* Sharp edges */
+            margin-top: 20px;
+            transition: background-color 0.2s, transform 0.1s;
+            box-shadow: 0 0 15px var(--color-accent-pink); /* Permanent button glow */
+        }
+
+        .cta-button:hover {
+            background-color: #FF33C7; /* Slightly brighter on hover */
+            transform: translateY(-2px); /* Lift effect */
+        }
+
+        /* Downloads Manager Styling */
+        .download-card {
+            background-color: var(--color-surface);
+            padding: 20px;
+            margin-bottom: 15px;
+            border-left: 5px solid var(--color-accent-pink); /* Status indicator line */
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .card-title {
+            font-size: 1.4em;
+            font-weight: bold;
+        }
+
+        /* Progress Bar (Thick and Glowing) */
+        .progress-container {
+            height: 25px;
+            background-color: #08080C;
+            border-radius: var(--border-radius);
+            margin: 15px 0;
+            position: relative;
+        }
+
+        .progress-fill {
+            height: 100%;
+            width: 75%; /* Example Progress */
+            background: linear-gradient(to right, var(--color-accent-pink), #8A00FF); /* Pink to Purple Gradient */
+            border-radius: var(--border-radius);
+            box-shadow: inset 0 0 10px rgba(255, 0, 160, 0.7); /* Inner glow */
+        }
+
+        .percentage-display {
+            position: absolute;
+            top: 50%;
+            right: 20px;
+            transform: translateY(-50%);
+            font-size: 3em;
+            font-weight: 900;
+            color: var(--color-accent-pink);
+            text-shadow: 0 0 10px var(--color-accent-pink); /* Massive Neon Number */
+        }
+
+        .speed-data {
+            color: #00FF80; /* Secondary Neon Green for speed data */
+            font-family: monospace;
+            font-size: 1em;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="nav-sidebar">
+        <div style="font-size: 1.5em; font-weight: bold; padding: 0 20px 30px;">GleanDown</div>
+        <div class="nav-item active">Glean It</div>
+        <div class="nav-item">Queue</div>
+        <div class="nav-item">History</div>
+        <div class="nav-item">Settings</div>
+    </div>
+
+    <div class="main-content">
+
+        <div class="card headline-section">
+            <h1 style="color: var(--color-text-light);"><span class="glean-word">GLEAN:</span> ZERO-FRICTION VIDEO DELIVERY</h1>
+            <input type="text" class="url-input" placeholder="Paste Video URL Here">
+            <button class="cta-button">DOWNLOAD NOW</button>
+            <div style="margin-top: 15px; font-size: 0.9em; color: #888;">Advanced Options...</div>
+        </div>
+
+        <div class="card" style="padding: 15px 30px;">
+             <h2 style="font-size: 1.2em; font-weight: 700; color: #BBB;">Advanced Configuration</h2>
+             </div>
+
+        <div class="card">
+            <h2 style="font-size: 1.8em; font-weight: 800; margin-bottom: 25px;">Active Downloads</h2>
+
+            <div class="download-card">
+                <div class="card-header">
+                    <span class="card-title">Awesome Video Title - Part 1</span>
+                    <span style="color: var(--color-accent-pink);">Downloading...</span>
+                </div>
+
+                <div class="progress-container">
+                    <div class="progress-fill" style="width: 75%;"></div>
+                    <span class="percentage-display">75%</span>
+                </div>
+
+                <div class="speed-data">
+                    Status: Processing (H.264) | Speed: 25.4 MB/s
+                </div>
+            </div>
+
+            <div class="download-card" style="border-left-color: #AAAAAA;">
+                <div class="card-header">
+                    <span class="card-title">Next Video in Queue</span>
+                    <span style="color: #AAAAAA;">Queued</span>
+                </div>
+
+                <div class="progress-container">
+                    <div class="progress-fill" style="width: 0%; background: #222;"></div>
+                    <span class="percentage-display" style="color: #AAAAAA; text-shadow: none;">0%</span>
+                </div>
+
+                <div class="speed-data" style="color: #888;">
+                    Status: Pending Start | Estimated Size: 450 MB
+                </div>
+            </div>
+
+        </div>
+
+    </div>
+</body>
+</html>

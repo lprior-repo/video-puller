@@ -366,7 +366,7 @@ fn run_download_fallback(
 /// Schedule next poll using BEAM's native timer
 /// This is the KEY improvement over infinite recursion!
 fn schedule_poll(manager: Subject(ManagerMessage), interval_ms: Int) -> Nil {
-  let _ = send_after(manager, interval_ms, types.PollJobs)
+  process.send_after(manager, interval_ms, types.PollJobs)
   Nil
 }
 
@@ -382,13 +382,6 @@ fn result_to_status(result: types.DownloadResult) -> types.VideoStatus {
 // External FFI declarations
 @external(erlang, "os", "system_time")
 fn get_timestamp() -> Int
-
-@external(erlang, "timer", "send_after")
-fn send_after(
-  target: Subject(ManagerMessage),
-  delay_ms: Int,
-  message: ManagerMessage,
-) -> Result(Nil, Nil)
 
 // Downloader FFI (to avoid circular imports)
 @external(erlang, "engine@downloader", "start")
