@@ -166,20 +166,83 @@ fn start_download(
   config: ytdlp.DownloadConfig,
   manager_subject: Subject(ManagerMessage),
 ) -> Result(Nil, String) {
+  // Spawn a process that creates its own subject and waits for result
+  let _ =
+    process.spawn(fn() {
+      run_download_and_report(job_id, url, config, manager_subject)
+    })
+  Ok(Nil)
+}
+
+/// Run a download in a spawned process and report result to manager
+fn run_download_and_report(
+  job_id: JobId,
+  url: String,
+  config: ytdlp.DownloadConfig,
+  manager_subject: Subject(ManagerMessage),
+) -> Nil {
   case downloader.start(config) {
-    Ok(subject) -> {
-      // Create a reply subject for receiving the download result
+    Ok(downloader_subject) -> {
+      // Create reply subject in THIS process (so we can receive on it)
       let reply_subject = process.new_subject()
 
-      // Send Download message to the downloader with manager subject for progress
+      // Send download command
       process.send(
-        subject,
+        downloader_subject,
         downloader.Download(job_id, url, reply_subject, manager_subject),
       )
 
-      Ok(Nil)
+      // Wait for result (30 minute timeout)
+      let result = process.receive(reply_subject, 1_800_000)
+
+      case result {
+        Ok(types.DownloadComplete(job_id, path)) -> {
+          io.println(
+            "Download completed: "
+            <> types.job_id_to_string(job_id)
+            <> " -> "
+            <> path,
+          )
+          process.send(
+            manager_subject,
+            types.JobStatusUpdate(job_id, types.Completed),
+          )
+        }
+        Ok(types.DownloadFailed(job_id, reason)) -> {
+          io.println(
+            "Download failed: "
+            <> types.job_id_to_string(job_id)
+            <> " - "
+            <> reason,
+          )
+          process.send(
+            manager_subject,
+            types.JobStatusUpdate(job_id, types.Failed(reason)),
+          )
+        }
+        Ok(types.DownloadProgress(_, _)) | Ok(types.DownloadStarted(_)) -> {
+          // Progress/started messages handled via progress_subject
+          Nil
+        }
+        Error(_) -> {
+          io.println(
+            "Download reply timeout for: " <> types.job_id_to_string(job_id),
+          )
+        }
+      }
     }
-    Error(_) -> Error("Failed to start downloader")
+    Error(_) -> {
+      io.println(
+        "Failed to start downloader for: " <> types.job_id_to_string(job_id),
+      )
+      process.send(
+        manager_subject,
+        types.JobStatusUpdate(
+          job_id,
+          types.Failed("Failed to start downloader"),
+        ),
+      )
+    }
   }
 }
 
