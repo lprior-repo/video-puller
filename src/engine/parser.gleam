@@ -7,9 +7,10 @@ import domain/core_types.{
 }
 import gleam/dynamic/decode
 import gleam/float
+import gleam/int
 import gleam/json
 import gleam/list
-import gleam/option.{type Option, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/regexp
 import gleam/string
 
@@ -243,9 +244,18 @@ pub fn extract_error(line: String) -> String {
   }
 }
 
-/// Simple float parsing using Gleam's built-in float parser
+/// Simple float parsing - handles both float strings ("45.3") and integer strings ("100")
 fn parse_float_string(str: String) -> Result(Float, Nil) {
-  float.parse(str)
+  case float.parse(str) {
+    Ok(f) -> Ok(f)
+    Error(_) -> {
+      // If not a float, try parsing as integer and convert
+      case int.parse(str) {
+        Ok(i) -> Ok(int.to_float(i))
+        Error(_) -> Error(Nil)
+      }
+    }
+  }
 }
 
 /// Round a float to nearest integer
@@ -324,8 +334,13 @@ fn video_metadata_decoder() -> decode.Decoder(VideoMetadata) {
   use thumbnail <- decode.then(decode.at(["thumbnail"], decode.string))
   use duration <- decode.then(decode.at(["duration"], decode.int))
   use uploader <- decode.then(decode.at(["uploader"], decode.string))
-  use view_count <- decode.then(
-    decode.optional(decode.at(["view_count"], decode.int)),
+  // Handle view_count which can be: missing, null, or an integer
+  // optional_field handles missing fields with default None
+  // decode.optional handles null values
+  use view_count <- decode.optional_field(
+    "view_count",
+    None,
+    decode.optional(decode.int),
   )
 
   decode.success(VideoMetadata(

@@ -3,7 +3,7 @@
 /// Starts and configures the Wisp HTTP server.
 /// Integrates with the application's database connection.
 import core/subscription_manager.{type SubscriptionMessage}
-import gleam/erlang/os
+import envoy
 import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/io
@@ -75,7 +75,7 @@ pub fn start_with_subscription(
 
 /// Get string from environment with default fallback
 fn get_env_string(key: String, default: String) -> String {
-  case os.get_env(key) {
+  case envoy.get(key) {
     Ok(value) -> value
     Error(_) -> default
   }
@@ -83,7 +83,7 @@ fn get_env_string(key: String, default: String) -> String {
 
 /// Get integer from environment with default fallback
 fn get_env_int(key: String, default: Int) -> Int {
-  case os.get_env(key) {
+  case envoy.get(key) {
     Ok(value) ->
       case int.parse(value) {
         Ok(n) -> n

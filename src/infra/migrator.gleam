@@ -7,11 +7,11 @@ import cake/insert
 import cake/select
 import cake/where
 import gleam/dynamic/decode
-import gleam/erlang
+import gleam/erlang/application
 import gleam/list
 import gleam/result
 import gleam/string
-import gleam_time
+import gleam/time/timestamp
 import infra/db.{type Db, type DbError}
 import simplifile
 
@@ -122,14 +122,16 @@ fn record_migration(conn: Db, filename: String) -> Result(Nil, DbError) {
 
 /// Get current Unix timestamp in seconds
 fn get_timestamp() -> Int {
-  gleam_time.now_utc()
-  |> gleam_time.to_unix_utc()
+  let #(seconds, _nanoseconds) =
+    timestamp.system_time()
+    |> timestamp.to_unix_seconds_and_nanoseconds()
+  seconds
 }
 
 /// Get the priv directory for the application
 /// Returns empty string on error (for fallback to development path)
 fn get_priv_directory(app: String) -> String {
-  case erlang.priv_directory(app) {
+  case application.priv_directory(app) {
     Ok(path) -> path
     Error(_) -> ""
   }

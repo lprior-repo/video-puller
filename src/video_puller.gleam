@@ -10,7 +10,7 @@ import core/manager
 import core/startup
 import core/subscription_manager
 import engine/ytdlp
-import gleam/erlang/os
+import envoy
 import gleam/erlang/process
 import gleam/int
 import gleam/io
@@ -149,7 +149,7 @@ fn default_download_config() -> ytdlp.DownloadConfig {
 
 /// Get boolean from environment with default fallback
 fn get_env_bool(key: String, default: Bool) -> Bool {
-  case os.get_env(key) {
+  case envoy.get(key) {
     Ok("true") | Ok("1") | Ok("yes") -> True
     Ok(_) -> False
     Error(_) -> default
@@ -158,7 +158,7 @@ fn get_env_bool(key: String, default: Bool) -> Bool {
 
 /// Get string from environment with default fallback
 fn get_env_string(key: String, default: String) -> String {
-  case os.get_env(key) {
+  case envoy.get(key) {
     Ok(value) -> value
     Error(_) -> default
   }
@@ -166,7 +166,7 @@ fn get_env_string(key: String, default: String) -> String {
 
 /// Get integer from environment with default fallback
 fn get_env_int(key: String, default: Int) -> Int {
-  case os.get_env(key) {
+  case envoy.get(key) {
     Ok(value) ->
       case int.parse(value) {
         Ok(n) -> n
