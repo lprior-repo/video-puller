@@ -39,7 +39,10 @@ pub fn exec_test() {
     Ok(conn) -> {
       // Create a test table
       let exec_result =
-        db.exec(conn, "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+        db.exec_raw(
+          conn,
+          "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)",
+        )
 
       let _ = db.close(conn)
       exec_result

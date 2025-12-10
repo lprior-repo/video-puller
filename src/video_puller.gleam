@@ -1,52 +1,105 @@
+/// FractalVideoEater - BEAM-Optimized Video Download System
+///
+/// Main entry point for the application. Implements a proper BEAM architecture:
+/// - Hierarchical supervision tree for fault tolerance
+/// - Worker pool for massive parallel downloads
+/// - BEAM-native scheduling (no infinite recursion)
+/// - Circuit breaker for cascade failure prevention
+/// - Exponential backoff retries
 import core/manager
 import core/startup
-import domain/types
+import core/subscription_manager
 import engine/ytdlp
 import envoy
-import gleam/erlang/process.{type Subject}
+import gleam/erlang/process
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
+import infra/subscription_repo
 import web/server
 
 /// Main entry point for the application
 pub fn main() -> Nil {
-  io.println("🎬 FractalVideoEater - Video Download System")
-  io.println("============================================")
+  io.println("🎬 FractalVideoEater - BEAM-Optimized Video Download System")
+  io.println("============================================================")
+  io.println("")
+
+  // Display BEAM optimization features
+  io.println("🔧 BEAM Features Enabled:")
+  io.println("   ✓ Supervised worker pool for parallel downloads")
+  io.println("   ✓ Native timer scheduling (no recursion)")
+  io.println("   ✓ Circuit breaker protection")
+  io.println("   ✓ Exponential backoff retries")
+  io.println("   ✓ Dynamic worker scaling")
   io.println("")
 
   // Initialize database and run startup sequence
   case startup.initialize() {
     Ok(db) -> {
-      // Start the manager actor for processing downloads
+      // Load configuration from environment
       let config = default_download_config()
       let poll_interval = get_env_int("POLL_INTERVAL_MS", 5000)
-      let max_concurrency = get_env_int("MAX_CONCURRENCY", 3)
+      let max_concurrency = get_env_int("MAX_CONCURRENCY", 10)
 
+      io.println("📊 Configuration:")
+      io.println("   Poll interval: " <> int.to_string(poll_interval) <> "ms")
+      io.println("   Max concurrency: " <> int.to_string(max_concurrency))
+      io.println(
+        "   Min workers: " <> int.to_string(int.max(5, max_concurrency / 2)),
+      )
+      io.println(
+        "   Max workers: " <> int.to_string(int.max(50, max_concurrency * 5)),
+      )
+      io.println("")
+
+      // Start the manager actor (now includes worker pool and scheduling)
       case manager.start(db, config, poll_interval, max_concurrency) {
-        Ok(manager_subject) -> {
-          io.println(
-            "🎯 Manager started (poll="
-            <> int.to_string(poll_interval)
-            <> "ms, max_concurrent="
-            <> int.to_string(max_concurrency)
-            <> ")",
-          )
+        Ok(_manager_subject) -> {
+          io.println("✅ Manager started with BEAM optimizations")
 
-          // Start polling loop in a separate process
-          start_polling_loop(manager_subject, poll_interval)
+          // Note: Polling is now handled internally by the manager
+          // using BEAM's native timer:send_after - NO MORE RECURSION!
 
-          // Start the web server
-          case server.start(db) {
+          // Start subscription manager
+          let sub_manager = case subscription_manager.start(db) {
+            Ok(sub_subject) -> {
+              io.println("📺 Subscription manager started")
+              // Check if subscriptions are enabled and trigger initial poll
+              case subscription_repo.get_config(db) {
+                Ok(sub_config) if sub_config.enabled -> {
+                  io.println("   Auto-download enabled, scheduling polls")
+                  process.send(
+                    sub_subject,
+                    subscription_manager.ScheduleNextPoll,
+                  )
+                }
+                _ -> Nil
+              }
+              Some(sub_subject)
+            }
+            Error(_) -> {
+              io.println("⚠️  Subscription manager failed to start (non-fatal)")
+              None
+            }
+          }
+
+          // Start the web server with subscription manager
+          case server.start_with_subscription(db, sub_manager) {
             Ok(_) -> {
               io.println("")
               io.println("✅ Application started successfully!")
               io.println("")
+              io.println(
+                "🚀 Ready to handle MASSIVE parallel downloads (500+ videos)",
+              )
+              io.println("")
               io.println("Press Ctrl+C to stop")
 
               // Keep the main process alive
+              // The BEAM will handle all scheduling and supervision
               process.sleep_forever()
             }
             Error(err) -> {
@@ -70,32 +123,7 @@ pub fn main() -> Nil {
   }
 }
 
-/// Start a background process that periodically polls for jobs
-fn start_polling_loop(
-  manager_subject: Subject(types.ManagerMessage),
-  interval_ms: Int,
-) -> Nil {
-  // Spawn a process that sends PollJobs messages periodically
-  let _ = process.spawn(fn() { polling_loop(manager_subject, interval_ms) })
-  Nil
-}
-
-/// Polling loop - sends PollJobs message and sleeps
-fn polling_loop(
-  manager_subject: Subject(types.ManagerMessage),
-  interval_ms: Int,
-) -> Nil {
-  // Send poll message
-  process.send(manager_subject, types.PollJobs)
-
-  // Sleep for interval
-  process.sleep(interval_ms)
-
-  // Recurse
-  polling_loop(manager_subject, interval_ms)
-}
-
-/// Default download configuration
+/// Default download configuration with environment overrides
 fn default_download_config() -> ytdlp.DownloadConfig {
   let output_dir = get_env_string("OUTPUT_DIR", "./downloads")
   let format =

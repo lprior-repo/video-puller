@@ -2,10 +2,13 @@
 ///
 /// Starts and configures the Wisp HTTP server.
 /// Integrates with the application's database connection.
+import core/subscription_manager.{type SubscriptionMessage}
 import envoy
+import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/option.{type Option}
 import gleam/string
 import infra/db.{type Db}
 import mist
@@ -16,16 +19,34 @@ import wisp/wisp_mist
 
 /// Start the web server
 pub fn start(db: Db) -> Result(Nil, String) {
+  start_with_subscription(db, option.None)
+}
+
+/// Start the web server with subscription manager
+pub fn start_with_subscription(
+  db: Db,
+  subscription_manager: Option(Subject(SubscriptionMessage)),
+) -> Result(Nil, String) {
   // Get configuration from environment
   let port = get_env_int("PORT", 8080)
   let static_dir = get_env_string("STATIC_DIR", "./priv/static")
+  let output_dir = get_env_string("OUTPUT_DIR", "./downloads")
   let secret_key = get_env_string("SECRET_KEY", generate_secret_key())
 
   // Configure Wisp
   wisp.configure_logger()
 
-  // Create request context
-  let ctx = middleware.new_context(db, static_dir)
+  // Create request context with or without subscription manager
+  let ctx = case subscription_manager {
+    option.Some(manager) ->
+      middleware.new_context_with_subscription(
+        db,
+        static_dir,
+        output_dir,
+        manager,
+      )
+    option.None -> middleware.new_context(db, static_dir, output_dir)
+  }
 
   // Create the request handler
   let handler = fn(req) { router.handle_request(req, ctx) }

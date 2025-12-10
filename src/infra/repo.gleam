@@ -1,14 +1,17 @@
 /// Repository layer for video jobs
 ///
 /// Data access objects (DAOs) for CRUD operations on video_jobs table.
-/// All functions use prepared statements to prevent SQL injection.
+/// All queries use Cake query builder for type-safe SQL generation.
+import cake/insert
+import cake/select
+import cake/update
+import cake/where
 import domain/types.{type JobId, type VideoJob, type VideoStatus}
 import gleam/dynamic/decode
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import infra/db.{type Db, type DbError}
-import sqlight
 
 /// Insert a new video job into the database
 pub fn insert_job(
@@ -17,25 +20,36 @@ pub fn insert_job(
   url: String,
   created_at: Int,
 ) -> Result(Nil, DbError) {
-  let sql =
-    "
-    INSERT INTO video_jobs (id, url, status, progress, path, error_message, title, thumbnail_url, duration_seconds, format_code, created_at, updated_at)
-    VALUES (?, ?, 'pending', 0, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
-  "
-
   let id_str = types.job_id_to_string(job_id)
 
-  db.query(
-    conn,
-    sql,
-    [
-      sqlight.text(id_str),
-      sqlight.text(url),
-      sqlight.int(created_at),
-      sqlight.int(created_at),
-    ],
-    decode.at([0], decode.int),
-  )
+  let query =
+    insert.from_values(
+      table_name: "video_jobs",
+      columns: [
+        "id", "url", "status", "progress", "path", "error_message", "title",
+        "thumbnail_url", "duration_seconds", "format_code", "created_at",
+        "updated_at",
+      ],
+      values: [
+        insert.row([
+          insert.string(id_str),
+          insert.string(url),
+          insert.string("pending"),
+          insert.int(0),
+          insert.null(),
+          insert.null(),
+          insert.null(),
+          insert.null(),
+          insert.null(),
+          insert.null(),
+          insert.int(created_at),
+          insert.int(created_at),
+        ]),
+      ],
+    )
+    |> insert.to_query()
+
+  db.run_write(conn, query, decode.dynamic)
   |> result.replace(Nil)
 }
 
@@ -44,21 +58,26 @@ pub fn list_jobs(
   conn: Db,
   status_filter: Option(String),
 ) -> Result(List(VideoJob), DbError) {
-  let sql = case status_filter {
-    None ->
-      "SELECT id, url, status, progress, path, error_message, title, thumbnail_url, duration_seconds, format_code, created_at, updated_at
-       FROM video_jobs ORDER BY created_at DESC"
-    Some(_) ->
-      "SELECT id, url, status, progress, path, error_message, title, thumbnail_url, duration_seconds, format_code, created_at, updated_at
-       FROM video_jobs WHERE status = ? ORDER BY created_at DESC"
-  }
+  let base_query =
+    select.new()
+    |> select.from_table("video_jobs")
+    |> select.select_cols([
+      "id", "url", "status", "progress", "path", "error_message", "title",
+      "thumbnail_url", "duration_seconds", "format_code", "created_at",
+      "updated_at",
+    ])
+    |> select.order_by_desc("created_at")
 
-  let args = case status_filter {
-    None -> []
-    Some(status) -> [sqlight.text(status)]
-  }
+  let query =
+    case status_filter {
+      None -> base_query
+      Some(status) ->
+        base_query
+        |> select.where(where.eq(where.col("status"), where.string(status)))
+    }
+    |> select.to_query()
 
-  db.query(conn, sql, args, video_job_decoder())
+  db.run_read(conn, query, video_job_decoder())
 }
 
 /// Update job status
@@ -71,36 +90,31 @@ pub fn update_status(
   let status_str = types.status_to_string(status)
   let id_str = types.job_id_to_string(job_id)
 
-  let #(sql, args) = case status {
-    types.Downloading(progress) -> #(
-      "UPDATE video_jobs SET status = ?, progress = ?, updated_at = ? WHERE id = ?",
-      [
-        sqlight.text(status_str),
-        sqlight.int(progress),
-        sqlight.int(updated_at),
-        sqlight.text(id_str),
-      ],
-    )
-    types.Completed -> #(
-      "UPDATE video_jobs SET status = ?, progress = 100, updated_at = ? WHERE id = ?",
-      [sqlight.text(status_str), sqlight.int(updated_at), sqlight.text(id_str)],
-    )
-    types.Failed(reason) -> #(
-      "UPDATE video_jobs SET status = ?, error_message = ?, updated_at = ? WHERE id = ?",
-      [
-        sqlight.text(status_str),
-        sqlight.text(reason),
-        sqlight.int(updated_at),
-        sqlight.text(id_str),
-      ],
-    )
-    types.Pending -> #(
-      "UPDATE video_jobs SET status = ?, progress = 0, updated_at = ? WHERE id = ?",
-      [sqlight.text(status_str), sqlight.int(updated_at), sqlight.text(id_str)],
-    )
-  }
+  let base_update =
+    update.new()
+    |> update.table("video_jobs")
+    |> update.set(update.set_string("status", status_str))
+    |> update.set(update.set_int("updated_at", updated_at))
+    |> update.where(where.eq(where.col("id"), where.string(id_str)))
 
-  db.query(conn, sql, args, decode.at([0], decode.int))
+  let query =
+    case status {
+      types.Downloading(progress) ->
+        base_update
+        |> update.set(update.set_int("progress", progress))
+      types.Completed ->
+        base_update
+        |> update.set(update.set_int("progress", 100))
+      types.Failed(reason) ->
+        base_update
+        |> update.set(update.set_string("error_message", reason))
+      types.Pending ->
+        base_update
+        |> update.set(update.set_int("progress", 0))
+    }
+    |> update.to_query()
+
+  db.run_write(conn, query, decode.dynamic)
   |> result.replace(Nil)
 }
 
@@ -111,15 +125,17 @@ pub fn update_path(
   path: String,
   updated_at: Int,
 ) -> Result(Nil, DbError) {
-  let sql = "UPDATE video_jobs SET path = ?, updated_at = ? WHERE id = ?"
   let id_str = types.job_id_to_string(job_id)
 
-  db.query(
-    conn,
-    sql,
-    [sqlight.text(path), sqlight.int(updated_at), sqlight.text(id_str)],
-    decode.at([0], decode.int),
-  )
+  let query =
+    update.new()
+    |> update.table("video_jobs")
+    |> update.set(update.set_string("path", path))
+    |> update.set(update.set_int("updated_at", updated_at))
+    |> update.where(where.eq(where.col("id"), where.string(id_str)))
+    |> update.to_query()
+
+  db.run_write(conn, query, decode.dynamic)
   |> result.replace(Nil)
 }
 
@@ -132,35 +148,33 @@ pub fn update_metadata(
   duration_seconds: Option(Int),
   updated_at: Int,
 ) -> Result(Nil, DbError) {
-  let sql =
-    "UPDATE video_jobs SET title = ?, thumbnail_url = ?, duration_seconds = ?, updated_at = ? WHERE id = ?"
   let id_str = types.job_id_to_string(job_id)
 
-  let title_value = case title {
-    Some(t) -> sqlight.text(t)
-    None -> sqlight.null()
-  }
-  let thumbnail_value = case thumbnail_url {
-    Some(u) -> sqlight.text(u)
-    None -> sqlight.null()
-  }
-  let duration_value = case duration_seconds {
-    Some(d) -> sqlight.int(d)
-    None -> sqlight.null()
+  let base_update =
+    update.new()
+    |> update.table("video_jobs")
+    |> update.set(update.set_int("updated_at", updated_at))
+    |> update.where(where.eq(where.col("id"), where.string(id_str)))
+
+  let with_title = case title {
+    Some(t) -> update.set(base_update, update.set_string("title", t))
+    None -> update.set(base_update, update.set_null("title"))
   }
 
-  db.query(
-    conn,
-    sql,
-    [
-      title_value,
-      thumbnail_value,
-      duration_value,
-      sqlight.int(updated_at),
-      sqlight.text(id_str),
-    ],
-    decode.at([0], decode.int),
-  )
+  let with_thumbnail = case thumbnail_url {
+    Some(u) -> update.set(with_title, update.set_string("thumbnail_url", u))
+    None -> update.set(with_title, update.set_null("thumbnail_url"))
+  }
+
+  let query =
+    case duration_seconds {
+      Some(d) ->
+        update.set(with_thumbnail, update.set_int("duration_seconds", d))
+      None -> update.set(with_thumbnail, update.set_null("duration_seconds"))
+    }
+    |> update.to_query()
+
+  db.run_write(conn, query, decode.dynamic)
   |> result.replace(Nil)
 }
 
@@ -168,29 +182,35 @@ pub fn update_metadata(
 /// This is run on application startup to recover from crashes
 pub fn reset_zombies(conn: Db, updated_at: Int) -> Result(Int, DbError) {
   // First count how many zombies we have
-  let count_sql = "SELECT COUNT(*) FROM video_jobs WHERE status = 'downloading'"
-  use count_rows <- result.try(db.query(
+  let count_query =
+    select.new()
+    |> select.from_table("video_jobs")
+    |> select.select_cols(["COUNT(*)"])
+    |> select.where(where.eq(where.col("status"), where.string("downloading")))
+    |> select.to_query()
+
+  use count_rows <- result.try(db.run_read(
     conn,
-    count_sql,
-    [],
+    count_query,
     decode.at([0], decode.int),
   ))
+
   let zombie_count = case list.first(count_rows) {
     Ok(n) -> n
     Error(_) -> 0
   }
 
-  // Then update them (using query to support parameters, ignore empty result)
-  let update_sql =
-    "UPDATE video_jobs SET status = 'pending', progress = 0, updated_at = ?
-     WHERE status = 'downloading'"
+  // Then update them
+  let update_query =
+    update.new()
+    |> update.table("video_jobs")
+    |> update.set(update.set_string("status", "pending"))
+    |> update.set(update.set_int("progress", 0))
+    |> update.set(update.set_int("updated_at", updated_at))
+    |> update.where(where.eq(where.col("status"), where.string("downloading")))
+    |> update.to_query()
 
-  use _ <- result.try(db.query(
-    conn,
-    update_sql,
-    [sqlight.int(updated_at)],
-    decode.at([0], decode.int),
-  ))
+  use _ <- result.try(db.run_write(conn, update_query, decode.dynamic))
 
   Ok(zombie_count)
 }

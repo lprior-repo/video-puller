@@ -2,13 +2,16 @@
 ///
 /// Handles running SQL migrations from the priv/migrations directory.
 /// Migrations are run in order and tracked to prevent re-running.
+/// Uses Cake query builder for tracking queries.
+import cake/insert
+import cake/select
+import cake/where
 import gleam/dynamic/decode
 import gleam/list
 import gleam/result
 import gleam/string
 import infra/db.{type Db, type DbError}
 import simplifile
-import sqlight
 
 /// Run all pending migrations
 pub fn run_migrations(conn: Db) -> Result(Nil, DbError) {
@@ -26,7 +29,7 @@ fn create_migrations_table(conn: Db) -> Result(Nil, DbError) {
       applied_at INTEGER NOT NULL
     );
   "
-  db.exec(conn, sql)
+  db.exec_raw(conn, sql)
 }
 
 /// Load all SQL migration files from priv/migrations
@@ -73,7 +76,7 @@ fn run_migration(
   case already_applied {
     True -> Ok(Nil)
     False -> {
-      use _ <- result.try(db.exec(conn, sql))
+      use _ <- result.try(db.exec_raw(conn, sql))
       record_migration(conn, filename)
     }
   }
@@ -81,14 +84,14 @@ fn run_migration(
 
 /// Check if a migration has already been applied
 fn is_migration_applied(conn: Db, filename: String) -> Result(Bool, DbError) {
-  let sql = "SELECT COUNT(*) as count FROM schema_migrations WHERE version = ?"
+  let query =
+    select.new()
+    |> select.from_table("schema_migrations")
+    |> select.select_cols(["COUNT(*)"])
+    |> select.where(where.eq(where.col("version"), where.string(filename)))
+    |> select.to_query()
 
-  use rows <- result.try(db.query(
-    conn,
-    sql,
-    [sqlight.text(filename)],
-    decode.at([0], decode.int),
-  ))
+  use rows <- result.try(db.run_read(conn, query, decode.at([0], decode.int)))
 
   case list.first(rows) {
     Ok(count) -> Ok(count > 0)
@@ -98,16 +101,17 @@ fn is_migration_applied(conn: Db, filename: String) -> Result(Bool, DbError) {
 
 /// Record that a migration has been applied
 fn record_migration(conn: Db, filename: String) -> Result(Nil, DbError) {
-  let sql = "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)"
-
   let timestamp = get_timestamp()
 
-  db.query(
-    conn,
-    sql,
-    [sqlight.text(filename), sqlight.int(timestamp)],
-    decode.at([0], decode.int),
-  )
+  let query =
+    insert.from_values(
+      table_name: "schema_migrations",
+      columns: ["version", "applied_at"],
+      values: [insert.row([insert.string(filename), insert.int(timestamp)])],
+    )
+    |> insert.to_query()
+
+  db.run_write(conn, query, decode.dynamic)
   |> result.replace_error(db.MigrationError(
     "Failed to record migration: " <> filename,
   ))

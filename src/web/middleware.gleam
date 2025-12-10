@@ -2,17 +2,49 @@
 ///
 /// Provides the HTTP middleware stack for the web application.
 /// Handles logging, static files, and request processing.
+import core/subscription_manager.{type SubscriptionMessage}
+import gleam/erlang/process.{type Subject}
+import gleam/option.{type Option}
 import infra/db.{type Db}
 import wisp.{type Request, type Response}
 
 /// Application context passed to handlers
 pub type Context {
-  Context(db: Db, static_directory: String)
+  Context(
+    db: Db,
+    static_directory: String,
+    output_directory: String,
+    subscription_manager: Option(Subject(SubscriptionMessage)),
+  )
 }
 
 /// Create a new context with database connection and static directory
-pub fn new_context(db: Db, static_directory: String) -> Context {
-  Context(db: db, static_directory: static_directory)
+pub fn new_context(
+  db: Db,
+  static_directory: String,
+  output_directory: String,
+) -> Context {
+  Context(
+    db: db,
+    static_directory: static_directory,
+    output_directory: output_directory,
+    subscription_manager: option.None,
+  )
+}
+
+/// Create a context with subscription manager
+pub fn new_context_with_subscription(
+  db: Db,
+  static_directory: String,
+  output_directory: String,
+  subscription_manager: Subject(SubscriptionMessage),
+) -> Context {
+  Context(
+    db: db,
+    static_directory: static_directory,
+    output_directory: output_directory,
+    subscription_manager: option.Some(subscription_manager),
+  )
 }
 
 /// Main middleware stack

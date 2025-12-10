@@ -1,11 +1,20 @@
-/// Manager Actor - Job Queue Orchestrator
+/// Manager Actor - Job Queue Orchestrator (BEAM-Optimized)
 ///
-/// Polls the database for pending jobs and dispatches them to downloader actors.
-/// Implements the core orchestration logic with configurable polling intervals.
-import domain/types.{type JobId, type ManagerMessage, SetSelf}
-import engine/downloader
+/// Polls the database for pending jobs and dispatches them to the worker pool.
+/// Implements the core orchestration logic with:
+/// - Worker pool integration for supervised downloads
+/// - BEAM-native scheduling (no infinite recursion)
+/// - Backpressure awareness
+/// - Graceful degradation under load
+import core/worker_pool
+import domain/types.{
+  type JobId, type ManagerMessage, ManagerStats, SetSelf, SetWorkerPool,
+}
 import engine/ytdlp
+import gleam/dict.{type Dict}
+import gleam/dynamic
 import gleam/erlang/process.{type Subject}
+import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -20,10 +29,21 @@ pub opaque type ManagerState {
     db: Db,
     config: ytdlp.DownloadConfig,
     poll_interval_ms: Int,
-    active_downloads: List(JobId),
+    // Active downloads tracked by job_id
+    active_downloads: Dict(String, ActiveDownload),
     max_concurrency: Int,
+    // Worker pool for supervised download execution
+    worker_pool: Option(Subject(worker_pool.PoolMessage)),
+    // Self reference for scheduling
     self: Option(Subject(ManagerMessage)),
+    // Statistics for monitoring
+    stats: types.ManagerStats,
   )
+}
+
+/// Active download tracking
+pub type ActiveDownload {
+  ActiveDownload(job_id: JobId, url: String, started_at: Int)
 }
 
 /// Start the manager actor
@@ -38,9 +58,16 @@ pub fn start(
       db: db,
       config: config,
       poll_interval_ms: poll_interval_ms,
-      active_downloads: [],
+      active_downloads: dict.new(),
       max_concurrency: max_concurrency,
+      worker_pool: None,
       self: None,
+      stats: types.ManagerStats(
+        total_dispatched: 0,
+        total_completed: 0,
+        total_failed: 0,
+        polls_executed: 0,
+      ),
     )
 
   actor.start(
@@ -48,9 +75,35 @@ pub fn start(
     |> actor.on_message(handle_message),
   )
   |> result.map(fn(started) {
-    // Send the subject back to itself so it can store it
     let subject = started.data
+
+    // Set self reference
     process.send(subject, SetSelf(subject))
+
+    // Initialize worker pool with higher capacity for BEAM
+    let min_workers = int.max(5, max_concurrency / 2)
+    let max_workers = int.max(50, max_concurrency * 5)
+
+    case worker_pool.start(config, subject, min_workers, max_workers) {
+      Ok(pool) -> {
+        io.println(
+          "✅ Worker pool initialized (min="
+          <> int.to_string(min_workers)
+          <> ", max="
+          <> int.to_string(max_workers)
+          <> ")",
+        )
+        // Use dynamic to store the pool subject (avoids circular type dependency)
+        process.send(subject, SetWorkerPool(pool_to_dynamic(pool)))
+      }
+      Error(_) -> {
+        io.println("⚠️  Failed to start worker pool, using fallback mode")
+      }
+    }
+
+    // Schedule first poll using BEAM scheduler
+    schedule_poll(subject, poll_interval_ms)
+
     subject
   })
 }
@@ -62,36 +115,57 @@ fn handle_message(
 ) -> actor.Next(ManagerState, ManagerMessage) {
   case message {
     types.PollJobs -> {
-      // Check for pending jobs and dispatch
       let new_state = poll_and_dispatch(state)
 
-      // Note: In production, we'd use process.send_after with a subject
-      // to schedule the next poll. For now, external callers will trigger polls.
+      // Schedule next poll using BEAM's native scheduler (no recursion!)
+      case state.self {
+        Some(self) -> schedule_poll(self, state.poll_interval_ms)
+        None -> Nil
+      }
 
-      actor.continue(new_state)
+      let updated_stats =
+        types.ManagerStats(
+          ..new_state.stats,
+          polls_executed: new_state.stats.polls_executed + 1,
+        )
+
+      actor.continue(ManagerState(..new_state, stats: updated_stats))
     }
 
     types.JobStatusUpdate(job_id, status) -> {
-      // Update job status in database
       let timestamp = get_timestamp()
       let _ = repo.update_status(state.db, job_id, status, timestamp)
 
-      // Remove from active downloads if terminal
-      let new_active = case types.is_terminal_status(status) {
-        True ->
-          list.filter(state.active_downloads, fn(id) {
-            types.job_id_to_string(id) != types.job_id_to_string(job_id)
-          })
-        False -> state.active_downloads
+      let job_id_str = types.job_id_to_string(job_id)
+
+      // Update statistics and remove from active if terminal
+      let #(new_active, new_stats) = case types.is_terminal_status(status) {
+        True -> {
+          let updated_active = dict.delete(state.active_downloads, job_id_str)
+          let updated_stats = case status {
+            types.Completed ->
+              types.ManagerStats(
+                ..state.stats,
+                total_completed: state.stats.total_completed + 1,
+              )
+            types.Failed(_) ->
+              types.ManagerStats(
+                ..state.stats,
+                total_failed: state.stats.total_failed + 1,
+              )
+            _ -> state.stats
+          }
+          #(updated_active, updated_stats)
+        }
+        False -> #(state.active_downloads, state.stats)
       }
 
-      let new_state = ManagerState(..state, active_downloads: new_active)
-
-      actor.continue(new_state)
+      actor.continue(
+        ManagerState(..state, active_downloads: new_active, stats: new_stats),
+      )
     }
 
     types.UpdateProgress(job_id, progress) -> {
-      // Update job status with progress in database
       let timestamp = get_timestamp()
       let _ =
         repo.update_status(
@@ -100,58 +174,95 @@ fn handle_message(
           types.Downloading(progress),
           timestamp,
         )
-
       actor.continue(state)
     }
 
     types.Shutdown -> {
-      io.println("Manager shutting down...")
+      io.println("🛑 Manager shutting down...")
+
+      // Shutdown worker pool gracefully
+      case state.worker_pool {
+        Some(pool) -> process.send(pool, worker_pool.Shutdown)
+        None -> Nil
+      }
+
       actor.stop()
     }
 
     SetSelf(subject) -> {
-      let new_state = ManagerState(..state, self: Some(subject))
-      actor.continue(new_state)
+      actor.continue(ManagerState(..state, self: Some(subject)))
+    }
+
+    SetWorkerPool(pool_dynamic) -> {
+      // Decode the dynamic pool subject
+      case unsafe_coerce_pool(pool_dynamic) {
+        pool -> {
+          io.println("📦 Worker pool registered with manager")
+          actor.continue(ManagerState(..state, worker_pool: Some(pool)))
+        }
+      }
+    }
+
+    types.GetStats(reply) -> {
+      process.send(reply, state.stats)
+      actor.continue(state)
     }
   }
 }
 
-/// Poll database and dispatch pending jobs
+/// Poll database and dispatch pending jobs to worker pool
 fn poll_and_dispatch(state: ManagerState) -> ManagerState {
   // Check if we can accept more jobs
-  let active_count = list.length(state.active_downloads)
+  let active_count = dict.size(state.active_downloads)
   let available_slots = state.max_concurrency - active_count
 
-  case available_slots > 0, state.self {
+  case available_slots > 0, state.worker_pool {
     False, _ -> state
-    _, None -> state
-    True, Some(self) -> {
+    _, None -> {
+      // No worker pool - use fallback dispatch
+      fallback_dispatch(state, available_slots)
+    }
+    True, Some(pool) -> {
       // Get pending jobs
       case repo.list_jobs(state.db, Some("pending")) {
         Ok(jobs) -> {
-          // Take only what we can handle
           let jobs_to_start =
             jobs
             |> list.take(available_slots)
 
-          // Start each job
-          let new_active =
-            list.fold(jobs_to_start, state.active_downloads, fn(active, job) {
-              case start_download(job.id, job.url, state.config, self) {
-                Ok(_) -> {
-                  io.println(
-                    "Started download: "
-                    <> types.job_id_to_string(job.id)
-                    <> " - "
-                    <> job.url,
-                  )
-                  [job.id, ..active]
-                }
-                Error(_) -> active
-              }
+          // Submit jobs to worker pool
+          let #(new_active, dispatched_count) =
+            list.fold(jobs_to_start, #(state.active_downloads, 0), fn(acc, job) {
+              let #(active, count) = acc
+
+              // Submit to worker pool
+              process.send(pool, worker_pool.SubmitJob(job.id, job.url))
+
+              io.println(
+                "📤 Submitted to pool: "
+                <> types.job_id_to_string(job.id)
+                <> " - "
+                <> job.url,
+              )
+
+              // Track as active
+              let job_id_str = types.job_id_to_string(job.id)
+              let download =
+                ActiveDownload(
+                  job_id: job.id,
+                  url: job.url,
+                  started_at: get_timestamp(),
+                )
+              #(dict.insert(active, job_id_str, download), count + 1)
             })
 
-          ManagerState(..state, active_downloads: new_active)
+          let new_stats =
+            ManagerStats(
+              ..state.stats,
+              total_dispatched: state.stats.total_dispatched + dispatched_count,
+            )
+
+          ManagerState(..state, active_downloads: new_active, stats: new_stats)
         }
         Error(_) -> state
       }
@@ -159,82 +270,93 @@ fn poll_and_dispatch(state: ManagerState) -> ManagerState {
   }
 }
 
-/// Start a download by spawning a downloader actor
-fn start_download(
-  job_id: JobId,
-  url: String,
-  config: ytdlp.DownloadConfig,
-  manager_subject: Subject(ManagerMessage),
-) -> Result(Nil, String) {
-  // Spawn a process that creates its own subject and waits for result
-  let _ =
-    process.spawn(fn() {
-      run_download_and_report(job_id, url, config, manager_subject)
-    })
-  Ok(Nil)
+/// Fallback dispatch when worker pool isn't available
+/// Uses process.spawn() but should rarely be needed
+fn fallback_dispatch(state: ManagerState, available_slots: Int) -> ManagerState {
+  case state.self {
+    None -> state
+    Some(self) -> {
+      case repo.list_jobs(state.db, Some("pending")) {
+        Ok(jobs) -> {
+          let jobs_to_start =
+            jobs
+            |> list.take(available_slots)
+
+          let #(new_active, dispatched_count) =
+            list.fold(jobs_to_start, #(state.active_downloads, 0), fn(acc, job) {
+              let #(active, count) = acc
+
+              // Spawn process directly (fallback mode)
+              let _ =
+                process.spawn(fn() {
+                  run_download_fallback(job.id, job.url, state.config, self)
+                })
+
+              io.println(
+                "⚠️  Fallback spawn: "
+                <> types.job_id_to_string(job.id)
+                <> " - "
+                <> job.url,
+              )
+
+              let job_id_str = types.job_id_to_string(job.id)
+              let download =
+                ActiveDownload(
+                  job_id: job.id,
+                  url: job.url,
+                  started_at: get_timestamp(),
+                )
+              #(dict.insert(active, job_id_str, download), count + 1)
+            })
+
+          let new_stats =
+            ManagerStats(
+              ..state.stats,
+              total_dispatched: state.stats.total_dispatched + dispatched_count,
+            )
+
+          ManagerState(..state, active_downloads: new_active, stats: new_stats)
+        }
+        Error(_) -> state
+      }
+    }
+  }
 }
 
-/// Run a download in a spawned process and report result to manager
-fn run_download_and_report(
+/// Fallback download execution (when worker pool isn't available)
+fn run_download_fallback(
   job_id: JobId,
   url: String,
   config: ytdlp.DownloadConfig,
   manager_subject: Subject(ManagerMessage),
 ) -> Nil {
-  case downloader.start(config) {
+  // Import downloader only for fallback
+  case start_downloader(config) {
     Ok(downloader_subject) -> {
-      // Create reply subject in THIS process (so we can receive on it)
       let reply_subject = process.new_subject()
 
-      // Send download command
       process.send(
         downloader_subject,
-        downloader.Download(job_id, url, reply_subject, manager_subject),
+        make_download_message(job_id, url, reply_subject, manager_subject),
       )
 
-      // Wait for result (30 minute timeout)
-      let result = process.receive(reply_subject, 1_800_000)
-
-      case result {
-        Ok(types.DownloadComplete(job_id, path)) -> {
-          io.println(
-            "Download completed: "
-            <> types.job_id_to_string(job_id)
-            <> " -> "
-            <> path,
-          )
-          process.send(
-            manager_subject,
-            types.JobStatusUpdate(job_id, types.Completed),
-          )
-        }
-        Ok(types.DownloadFailed(job_id, reason)) -> {
-          io.println(
-            "Download failed: "
-            <> types.job_id_to_string(job_id)
-            <> " - "
-            <> reason,
-          )
-          process.send(
-            manager_subject,
-            types.JobStatusUpdate(job_id, types.Failed(reason)),
-          )
-        }
-        Ok(types.DownloadProgress(_, _)) | Ok(types.DownloadStarted(_)) -> {
-          // Progress/started messages handled via progress_subject
-          Nil
+      case process.receive(reply_subject, 1_800_000) {
+        Ok(result) -> {
+          let status = result_to_status(result)
+          process.send(manager_subject, types.JobStatusUpdate(job_id, status))
         }
         Error(_) -> {
-          io.println(
-            "Download reply timeout for: " <> types.job_id_to_string(job_id),
+          process.send(
+            manager_subject,
+            types.JobStatusUpdate(
+              job_id,
+              types.Failed("Download timeout exceeded"),
+            ),
           )
         }
       }
     }
     Error(_) -> {
-      io.println(
-        "Failed to start downloader for: " <> types.job_id_to_string(job_id),
-      )
       process.send(
         manager_subject,
         types.JobStatusUpdate(
@@ -246,6 +368,56 @@ fn run_download_and_report(
   }
 }
 
-/// Get current Unix timestamp
+/// Schedule next poll using BEAM's native timer
+/// This is the KEY improvement over infinite recursion!
+fn schedule_poll(manager: Subject(ManagerMessage), interval_ms: Int) -> Nil {
+  let _ = send_after(manager, interval_ms, types.PollJobs)
+  Nil
+}
+
+/// Convert download result to video status
+fn result_to_status(result: types.DownloadResult) -> types.VideoStatus {
+  case result {
+    types.DownloadComplete(_, _) -> types.Completed
+    types.DownloadFailed(_, reason) -> types.Failed(reason)
+    _ -> types.Completed
+  }
+}
+
+// External FFI declarations
 @external(erlang, "os", "system_time")
 fn get_timestamp() -> Int
+
+@external(erlang, "timer", "send_after")
+fn send_after(
+  target: Subject(ManagerMessage),
+  delay_ms: Int,
+  message: ManagerMessage,
+) -> Result(Nil, Nil)
+
+/// Convert pool subject to dynamic
+/// This is necessary because of circular type dependencies
+@external(erlang, "erlang", "id")
+fn pool_to_dynamic(pool: Subject(worker_pool.PoolMessage)) -> dynamic.Dynamic
+
+/// Unsafe coercion of dynamic to pool subject
+/// This is necessary because of circular type dependencies
+/// We use Erlang's identity function to bypass the type system
+@external(erlang, "erlang", "id")
+fn unsafe_coerce_pool(d: dynamic.Dynamic) -> Subject(worker_pool.PoolMessage)
+
+// Downloader FFI (to avoid circular imports)
+@external(erlang, "engine@downloader", "start")
+fn start_downloader(
+  config: ytdlp.DownloadConfig,
+) -> Result(Subject(DownloaderMsg), actor.StartError)
+
+type DownloaderMsg
+
+@external(erlang, "engine@downloader", "Download")
+fn make_download_message(
+  job_id: JobId,
+  url: String,
+  reply: Subject(types.DownloadResult),
+  progress: Subject(ManagerMessage),
+) -> DownloaderMsg

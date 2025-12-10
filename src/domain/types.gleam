@@ -2,6 +2,7 @@
 ///
 /// This module defines the core types used throughout the application,
 /// following the schemas defined in the system specification.
+import gleam/dynamic.{type Dynamic}
 import gleam/erlang/process.{type Subject}
 import gleam/option.{type Option}
 
@@ -74,6 +75,20 @@ pub type ManagerMessage {
   UpdateProgress(job_id: JobId, progress: Int)
   Shutdown
   SetSelf(Subject(ManagerMessage))
+  // Worker pool integration (opaque type to avoid circular dependency)
+  SetWorkerPool(pool: Dynamic)
+  // Get manager statistics
+  GetStats(reply: Subject(ManagerStats))
+}
+
+/// Manager statistics for monitoring
+pub type ManagerStats {
+  ManagerStats(
+    total_dispatched: Int,
+    total_completed: Int,
+    total_failed: Int,
+    polls_executed: Int,
+  )
 }
 
 /// Configuration for the video downloader

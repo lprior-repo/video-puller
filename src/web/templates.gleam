@@ -2,15 +2,21 @@
 ///
 /// Server-side rendered HTML templates for the video puller UI.
 /// Uses Lustre's element API for type-safe HTML generation.
+import domain/subscription_types.{
+  type PollResult, type SeenVideo, type SubscriptionConfig,
+  type SubscriptionStatus,
+}
 import domain/types.{type VideoJob, type VideoStatus}
+import engine/video_filter
 import gleam/int
 import gleam/list
-import gleam/option
+import gleam/option.{None, Some}
+import gleam/string
 import lustre/attribute.{attribute, class, href, name, placeholder, type_}
 import lustre/element.{type Element, text}
 import lustre/element/html.{
-  a, body, button, div, form, h1, h2, head, html, input, li, link, main, meta,
-  nav, p, span, style, title, ul,
+  a, body, button, details, div, form, h1, h2, head, html, input, label, li,
+  link, main, meta, nav, option, p, select, span, style, summary, title, ul,
 }
 
 /// Base HTML layout wrapper
@@ -304,6 +310,72 @@ fn inline_styles() -> String {
     color: #888;
   }
 
+  .advanced-options summary {
+    cursor: pointer;
+    color: #FF00A0;
+    font-weight: 500;
+    padding: 8px 0;
+    list-style: none;
+  }
+
+  .advanced-options summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .advanced-options summary::before {
+    content: '▶ ';
+    font-size: 0.8em;
+  }
+
+  .advanced-options[open] summary::before {
+    content: '▼ ';
+  }
+
+  .advanced-options-content {
+    padding: 15px;
+    background: #0a0a0f;
+    border: 1px solid #222;
+    border-radius: 4px;
+    margin-top: 10px;
+  }
+
+  .option-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid #1a1a1f;
+  }
+
+  .option-row:last-child {
+    border-bottom: none;
+  }
+
+  .option-label {
+    color: #ccc;
+    font-weight: 500;
+  }
+
+  .option-select {
+    padding: 8px 12px;
+    background: #000;
+    color: #fff;
+    border: 1px solid #333;
+    border-radius: 4px;
+    min-width: 150px;
+  }
+
+  .option-select:focus {
+    outline: none;
+    border-color: #FF00A0;
+  }
+
+  .option-checkbox {
+    width: 18px;
+    height: 18px;
+    accent-color: #FF00A0;
+  }
+
   /* Settings Page Styles */
   .settings-section {
     background-color: #121215;
@@ -422,6 +494,36 @@ fn inline_styles() -> String {
     color: #FF00A0;
     margin-top: 20px;
   }
+
+  /* Download Directory Info Banner */
+  .download-dir-banner {
+    background-color: #1a1a1f;
+    border: 1px solid #2a2a32;
+    border-radius: 4px;
+    padding: 12px 20px;
+    margin-bottom: 20px;
+    font-size: 0.9em;
+    color: #999;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .download-dir-banner .label {
+    color: #666;
+    font-weight: 500;
+  }
+
+  .download-dir-banner .path {
+    color: #ccc;
+    font-family: monospace;
+    font-size: 0.95em;
+  }
+
+  .inline {
+    display: inline;
+  }
   "
 }
 
@@ -431,14 +533,54 @@ fn sidebar() -> Element(a) {
     div([class("nav-logo")], [text("GleanDown")]),
     a([href("/"), class("nav-item active")], [text("Glean It")]),
     a([href("/queue"), class("nav-item")], [text("Queue")]),
+    a([href("/subscriptions"), class("nav-item")], [text("Subscriptions")]),
     a([href("/history"), class("nav-item")], [text("History")]),
     a([href("/settings"), class("nav-item")], [text("Settings")]),
   ])
 }
 
+/// Open folder button component
+pub fn open_folder_button() -> Element(a) {
+  form(
+    [
+      attribute("action", "/open-folder"),
+      attribute("method", "POST"),
+      class("inline"),
+    ],
+    [
+      button(
+        [
+          type_("submit"),
+          class("px-4 py-2 font-semibold text-sm rounded"),
+          attribute(
+            "style",
+            "background-color: #FF00A0; color: #000000; box-shadow: 0 0 10px #FF00A0;",
+          ),
+        ],
+        [text("Open Folder")],
+      ),
+    ],
+  )
+}
+
+/// Download directory info banner with open folder button
+pub fn download_dir_info(output_directory: String) -> Element(a) {
+  div([class("download-dir-banner")], [
+    div([class("flex items-center gap-2")], [
+      span([class("label")], [text("Downloads saved to:")]),
+      span([class("path")], [text(output_directory)]),
+    ]),
+    open_folder_button(),
+  ])
+}
+
 /// Dashboard page content
-pub fn dashboard_page(jobs: List(VideoJob)) -> Element(a) {
+pub fn dashboard_page(
+  jobs: List(VideoJob),
+  output_directory: String,
+) -> Element(a) {
   div([], [
+    download_dir_info(output_directory),
     glean_it_form(),
     job_list(jobs),
   ])
@@ -453,9 +595,14 @@ pub fn queue_page(jobs: List(VideoJob)) -> Element(a) {
 }
 
 /// History page content - shows completed and failed jobs with filters
-pub fn history_page(jobs: List(VideoJob), filter: String) -> Element(a) {
+pub fn history_page(
+  jobs: List(VideoJob),
+  filter: String,
+  output_directory: String,
+) -> Element(a) {
   div([], [
     h2([class("text-2xl font-bold mb-6")], [text("Download History")]),
+    download_dir_info(output_directory),
     filter_tabs(filter),
     history_list(jobs),
   ])
@@ -481,6 +628,7 @@ fn glean_it_form() -> Element(a) {
           class("url-input"),
           attribute("required", ""),
         ]),
+        advanced_options_section(),
         button(
           [
             type_("submit"),
@@ -490,7 +638,44 @@ fn glean_it_form() -> Element(a) {
         ),
       ],
     ),
-    div([class("advanced-options")], [text("Advanced Options...")]),
+  ])
+}
+
+/// Advanced options expandable section
+pub fn advanced_options_section() -> Element(a) {
+  details([class("advanced-options")], [
+    summary([], [text("Advanced Options")]),
+    div([class("advanced-options-content")], [
+      // Quality selection
+      div([class("option-row")], [
+        label([class("option-label")], [text("Video Quality")]),
+        select([name("quality"), class("option-select")], [
+          option([attribute("value", "best")], "Best Available"),
+          option([attribute("value", "1080")], "1080p"),
+          option([attribute("value", "720")], "720p"),
+          option([attribute("value", "480")], "480p"),
+          option([attribute("value", "360")], "360p"),
+        ]),
+      ]),
+      // Audio only option
+      div([class("option-row")], [
+        label([class("option-label")], [text("Audio Only")]),
+        input([
+          type_("checkbox"),
+          name("audio_only"),
+          class("option-checkbox"),
+          attribute("value", "true"),
+        ]),
+      ]),
+      // Playlist handling
+      div([class("option-row")], [
+        label([class("option-label")], [text("Download Playlist")]),
+        select([name("playlist"), class("option-select")], [
+          option([attribute("value", "single")], "Single Video Only"),
+          option([attribute("value", "full")], "Full Playlist"),
+        ]),
+      ]),
+    ]),
   ])
 }
 
@@ -589,8 +774,9 @@ fn history_card(job: VideoJob) -> Element(a) {
         ]),
         case job.path {
           option.Some(path) ->
-            p([class("text-sm text-gray-400 mt-2")], [
-              text("File: " <> path),
+            div([class("mt-2")], [
+              p([class("text-sm text-gray-400")], [text("File: " <> path)]),
+              show_in_folder_button(path),
             ])
           option.None -> div([], [])
         },
@@ -625,6 +811,29 @@ fn retry_button(url: String) -> Element(a) {
           ),
         ],
         [text("Retry")],
+      ),
+    ],
+  )
+}
+
+/// Show in folder button for completed downloads
+pub fn show_in_folder_button(file_path: String) -> Element(a) {
+  form(
+    [
+      attribute("action", "/show-in-folder"),
+      attribute("method", "POST"),
+      class("inline mt-2"),
+    ],
+    [
+      input([type_("hidden"), name("path"), attribute("value", file_path)]),
+      button(
+        [
+          type_("submit"),
+          class(
+            "px-3 py-1 bg-gray-700 text-gray-300 border border-gray-600 rounded text-sm font-semibold hover:bg-gray-600",
+          ),
+        ],
+        [text("Show in Folder")],
       ),
     ],
   )
@@ -701,7 +910,7 @@ fn progress_section(status: VideoStatus) -> Element(a) {
 }
 
 /// Settings page content
-pub fn settings_page() -> Element(a) {
+pub fn settings_page(output_directory: String) -> Element(a) {
   div([], [
     h2([class("text-2xl font-bold mb-6")], [text("Settings")]),
     // Download Settings Section
@@ -717,7 +926,7 @@ pub fn settings_page() -> Element(a) {
         input([
           type_("text"),
           class("setting-input"),
-          attribute("value", "./downloads"),
+          attribute("value", output_directory),
           attribute("disabled", ""),
         ]),
       ]),
@@ -922,3 +1131,447 @@ fn speed_status_data(status: VideoStatus) -> Element(a) {
     }
   }
 }
+
+// =============================================================================
+// Subscription Templates
+// =============================================================================
+
+/// Subscriptions page content
+pub fn subscriptions_page(
+  config: SubscriptionConfig,
+  status: SubscriptionStatus,
+  recent_videos: List(SeenVideo),
+) -> Element(a) {
+  div([], [
+    h2([class("text-2xl font-bold mb-6")], [text("YouTube Subscriptions")]),
+    // Status banner
+    subscription_status_banner(status),
+    // Settings form
+    subscription_settings_form(config),
+    // Recent discoveries
+    subscription_feed_list(recent_videos),
+  ])
+}
+
+/// Status banner showing current subscription state
+fn subscription_status_banner(status: SubscriptionStatus) -> Element(a) {
+  let status_text = case status.enabled, status.is_polling {
+    True, True -> "Polling in progress..."
+    True, False -> "Enabled - Auto-downloading subscriptions"
+    False, _ -> "Disabled - Enable to start auto-downloading"
+  }
+
+  let status_color = case status.enabled {
+    True -> "border-left-color: #16a34a;"
+    False -> "border-left-color: #666;"
+  }
+
+  div(
+    [
+      class("settings-section"),
+      attribute("style", status_color),
+    ],
+    [
+      div([class("flex justify-between items-center")], [
+        div([], [
+          html.h3([], [text("Status")]),
+          p([class("text-gray-400")], [text(status_text)]),
+          case status.last_poll_at {
+            Some(ts) ->
+              p([class("text-sm text-gray-400 mt-2")], [
+                text("Last poll: " <> format_timestamp(ts)),
+              ])
+            None -> div([], [])
+          },
+          case status.last_result {
+            Some(result) -> poll_result_summary(result)
+            None -> div([], [])
+          },
+        ]),
+        // Manual poll button
+        form(
+          [
+            attribute("action", "/subscriptions/poll"),
+            attribute("method", "POST"),
+          ],
+          [
+            button(
+              [
+                type_("submit"),
+                class("cta-button"),
+                attribute(
+                  "style",
+                  "font-size: 1em; padding: 10px 20px; margin-top: 0;",
+                ),
+              ],
+              [text("Refresh Now")],
+            ),
+          ],
+        ),
+      ]),
+    ],
+  )
+}
+
+/// Poll result summary
+fn poll_result_summary(result: PollResult) -> Element(a) {
+  div([class("mt-2 text-sm")], [
+    span([class("text-gray-400")], [
+      text(
+        "Last result: "
+        <> int.to_string(result.total_found)
+        <> " found, "
+        <> int.to_string(result.queued_for_download)
+        <> " queued, "
+        <> int.to_string(result.skipped)
+        <> " skipped",
+      ),
+    ]),
+  ])
+}
+
+/// Subscription settings form
+fn subscription_settings_form(config: SubscriptionConfig) -> Element(a) {
+  form(
+    [
+      attribute("action", "/subscriptions/settings"),
+      attribute("method", "POST"),
+    ],
+    [
+      div([class("settings-section")], [
+        html.h3([], [text("Subscription Settings")]),
+        // Enable toggle
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [text("Enable Auto-Download")]),
+            div([class("setting-description")], [
+              text("Automatically download new videos from your subscriptions"),
+            ]),
+          ]),
+          html.label([class("toggle-switch")], [
+            input([
+              type_("checkbox"),
+              name("enabled"),
+              attribute("value", "true"),
+              case config.enabled {
+                True -> attribute("checked", "")
+                False -> attribute("data-unchecked", "")
+              },
+            ]),
+            span([class("toggle-slider")], []),
+          ]),
+        ]),
+        // Poll interval
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [text("Check Interval")]),
+            div([class("setting-description")], [
+              text("How often to check for new videos"),
+            ]),
+          ]),
+          select([name("poll_interval_minutes"), class("setting-input")], [
+            option(
+              [
+                attribute("value", "15"),
+                selected_attr(config.poll_interval_minutes == 15),
+              ],
+              "Every 15 minutes",
+            ),
+            option(
+              [
+                attribute("value", "30"),
+                selected_attr(config.poll_interval_minutes == 30),
+              ],
+              "Every 30 minutes",
+            ),
+            option(
+              [
+                attribute("value", "60"),
+                selected_attr(config.poll_interval_minutes == 60),
+              ],
+              "Every hour",
+            ),
+            option(
+              [
+                attribute("value", "120"),
+                selected_attr(config.poll_interval_minutes == 120),
+              ],
+              "Every 2 hours",
+            ),
+            option(
+              [
+                attribute("value", "360"),
+                selected_attr(config.poll_interval_minutes == 360),
+              ],
+              "Every 6 hours",
+            ),
+            option(
+              [
+                attribute("value", "720"),
+                selected_attr(config.poll_interval_minutes == 720),
+              ],
+              "Every 12 hours",
+            ),
+            option(
+              [
+                attribute("value", "1440"),
+                selected_attr(config.poll_interval_minutes == 1440),
+              ],
+              "Once daily",
+            ),
+          ]),
+        ]),
+        // Browser for cookies
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [text("Browser for Cookies")]),
+            div([class("setting-description")], [
+              text(
+                "Browser to extract YouTube login cookies from (must be closed)",
+              ),
+            ]),
+          ]),
+          select([name("browser"), class("setting-input")], [
+            option(
+              [
+                attribute("value", "firefox"),
+                selected_attr(
+                  subscription_types.browser_to_string(config.browser)
+                  == "firefox",
+                ),
+              ],
+              "Firefox",
+            ),
+            option(
+              [
+                attribute("value", "chrome"),
+                selected_attr(
+                  subscription_types.browser_to_string(config.browser)
+                  == "chrome",
+                ),
+              ],
+              "Chrome",
+            ),
+            option(
+              [
+                attribute("value", "chromium"),
+                selected_attr(
+                  subscription_types.browser_to_string(config.browser)
+                  == "chromium",
+                ),
+              ],
+              "Chromium",
+            ),
+            option(
+              [
+                attribute("value", "edge"),
+                selected_attr(
+                  subscription_types.browser_to_string(config.browser) == "edge",
+                ),
+              ],
+              "Edge",
+            ),
+            option(
+              [
+                attribute("value", "brave"),
+                selected_attr(
+                  subscription_types.browser_to_string(config.browser)
+                  == "brave",
+                ),
+              ],
+              "Brave",
+            ),
+          ]),
+        ]),
+      ]),
+      // Filters section
+      div([class("settings-section")], [
+        html.h3([], [text("Filters")]),
+        // Max age
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [text("Max Video Age (days)")]),
+            div([class("setting-description")], [
+              text("Only download videos published within this many days"),
+            ]),
+          ]),
+          input([
+            type_("number"),
+            name("max_age_days"),
+            class("setting-input"),
+            attribute("value", int.to_string(config.max_age_days)),
+            attribute("min", "1"),
+            attribute("max", "30"),
+          ]),
+        ]),
+        // Min duration
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [text("Minimum Duration (seconds)")]),
+            div([class("setting-description")], [
+              text("Skip videos shorter than this (120s = 2min skips Shorts)"),
+            ]),
+          ]),
+          input([
+            type_("number"),
+            name("min_duration_seconds"),
+            class("setting-input"),
+            attribute("value", int.to_string(config.min_duration_seconds)),
+            attribute("min", "0"),
+          ]),
+        ]),
+        // Max duration
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [text("Maximum Duration (seconds)")]),
+            div([class("setting-description")], [
+              text("Skip videos longer than this (0 = no limit)"),
+            ]),
+          ]),
+          input([
+            type_("number"),
+            name("max_duration_seconds"),
+            class("setting-input"),
+            attribute("value", case config.max_duration_seconds {
+              Some(d) -> int.to_string(d)
+              None -> ""
+            }),
+            attribute("min", "0"),
+            placeholder("No limit"),
+          ]),
+        ]),
+        // Keyword filter
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [text("Include Keywords")]),
+            div([class("setting-description")], [
+              text(
+                "Only download if title contains any of these (comma-separated, empty = all)",
+              ),
+            ]),
+          ]),
+          input([
+            type_("text"),
+            name("keyword_filter"),
+            class("setting-input"),
+            attribute("value", string.join(config.keyword_filter, ", ")),
+            placeholder("e.g. tutorial, review, gameplay"),
+          ]),
+        ]),
+        // Keyword exclude
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [text("Exclude Keywords")]),
+            div([class("setting-description")], [
+              text(
+                "Skip videos if title contains any of these (comma-separated)",
+              ),
+            ]),
+          ]),
+          input([
+            type_("text"),
+            name("keyword_exclude"),
+            class("setting-input"),
+            attribute("value", string.join(config.keyword_exclude, ", ")),
+            placeholder("e.g. sponsored, ad, trailer"),
+          ]),
+        ]),
+      ]),
+      // Save button
+      div([class("mt-4")], [
+        button(
+          [
+            type_("submit"),
+            class("cta-button"),
+            attribute("style", "font-size: 1.1em; padding: 12px 30px;"),
+          ],
+          [text("Save Settings")],
+        ),
+      ]),
+    ],
+  )
+}
+
+/// Subscription feed list showing recent discoveries
+pub fn subscription_feed_list(videos: List(SeenVideo)) -> Element(a) {
+  div([class("settings-section mt-6")], [
+    html.h3([], [text("Recent Discoveries")]),
+    case list.is_empty(videos) {
+      True ->
+        p([class("text-gray-400")], [
+          text(
+            "No videos discovered yet. Enable subscriptions and click Refresh to check for new videos.",
+          ),
+        ])
+      False -> ul([class("list-none")], list.map(videos, seen_video_card))
+    },
+  ])
+}
+
+/// Individual seen video card
+fn seen_video_card(video: SeenVideo) -> Element(a) {
+  let status_badge_content = case video.downloaded, video.skipped {
+    True, _ ->
+      span([class("status-badge status-completed")], [text("Downloaded")])
+    _, True ->
+      span([class("status-badge status-pending")], [
+        text(option.unwrap(video.skip_reason, "Skipped")),
+      ])
+    _, _ -> span([class("status-badge status-downloading")], [text("Queued")])
+  }
+
+  let duration_text = case video.duration_seconds {
+    Some(d) -> video_filter.format_duration(d)
+    None -> "Unknown"
+  }
+
+  li([class("download-card mb-4")], [
+    div([class("flex justify-between items-start")], [
+      div([class("flex-grow")], [
+        p([class("card-title")], [text(truncate_url(video.title, 60))]),
+        p([class("text-sm text-gray-400 mt-1")], [
+          text(option.unwrap(video.channel_name, "Unknown Channel")),
+        ]),
+        div([class("text-sm text-gray-500 mt-2")], [
+          span([], [text("Duration: " <> duration_text)]),
+          span([class("mx-2")], [text("|")]),
+          a(
+            [
+              href(video.url),
+              attribute("target", "_blank"),
+              class("text-blue-400"),
+            ],
+            [text("View on YouTube")],
+          ),
+        ]),
+      ]),
+      status_badge_content,
+    ]),
+  ])
+}
+
+/// Helper to add selected attribute conditionally
+fn selected_attr(is_selected: Bool) -> attribute.Attribute(a) {
+  case is_selected {
+    True -> attribute("selected", "")
+    False -> attribute("data-not-selected", "")
+  }
+}
+
+/// Format Unix timestamp to readable string
+fn format_timestamp(ts: Int) -> String {
+  // Simple formatting - just show relative time
+  let now = get_timestamp()
+  let age_seconds = now - ts
+
+  case age_seconds {
+    s if s < 60 -> "Just now"
+    s if s < 3600 -> int.to_string(s / 60) <> " minutes ago"
+    s if s < 86_400 -> int.to_string(s / 3600) <> " hours ago"
+    s -> int.to_string(s / 86_400) <> " days ago"
+  }
+}
+
+/// Get current Unix timestamp
+@external(erlang, "os", "system_time")
+fn get_timestamp() -> Int

@@ -36,6 +36,23 @@ fn route(req: Request, ctx: Context) -> Response {
     // Settings page
     http.Get, ["settings"] -> handlers.settings(req, ctx)
 
+    // Subscriptions page
+    http.Get, ["subscriptions"] -> handlers.subscriptions(req, ctx)
+
+    // Update subscription settings
+    http.Post, ["subscriptions", "settings"] ->
+      handlers.update_subscription_config(req, ctx)
+
+    // Trigger manual subscription poll
+    http.Post, ["subscriptions", "poll"] ->
+      handlers.poll_subscriptions(req, ctx)
+
+    // Open downloads folder
+    http.Post, ["open-folder"] -> handlers.open_folder(req, ctx)
+
+    // Show in folder
+    http.Post, ["show-in-folder"] -> handlers.show_in_folder(req, ctx)
+
     // 404 fallback
     _, _ -> not_found()
   }
