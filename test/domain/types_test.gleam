@@ -1,3 +1,4 @@
+import domain/core_types.{Completed, Downloading, Failed, Pending, VideoJob}
 import domain/types
 import gleam/option.{None}
 import gleeunit
@@ -16,55 +17,55 @@ pub fn job_id_test() {
 
 // Test status conversions
 pub fn status_to_string_test() {
-  types.status_to_string(types.Pending)
+  types.status_to_string(Pending)
   |> should.equal("pending")
 
-  types.status_to_string(types.Downloading(45))
+  types.status_to_string(Downloading(45))
   |> should.equal("downloading")
 
-  types.status_to_string(types.Completed)
+  types.status_to_string(Completed)
   |> should.equal("completed")
 
-  types.status_to_string(types.Failed("error"))
+  types.status_to_string(Failed("error"))
   |> should.equal("failed")
 }
 
 pub fn string_to_status_test() {
   types.string_to_status("pending")
-  |> should.equal(types.Pending)
+  |> should.equal(Pending)
 
   types.string_to_status("downloading")
-  |> should.equal(types.Downloading(0))
+  |> should.equal(Downloading(0))
 
   types.string_to_status("completed")
-  |> should.equal(types.Completed)
+  |> should.equal(Completed)
 
   types.string_to_status("failed")
-  |> should.equal(types.Failed("Unknown error"))
+  |> should.equal(Failed("Unknown error"))
 }
 
 // Test terminal status detection
 pub fn is_terminal_status_test() {
-  types.is_terminal_status(types.Pending)
+  types.is_terminal_status(Pending)
   |> should.be_false()
 
-  types.is_terminal_status(types.Downloading(50))
+  types.is_terminal_status(Downloading(50))
   |> should.be_false()
 
-  types.is_terminal_status(types.Completed)
+  types.is_terminal_status(Completed)
   |> should.be_true()
 
-  types.is_terminal_status(types.Failed("error"))
+  types.is_terminal_status(Failed("error"))
   |> should.be_true()
 }
 
 // Test VideoJob creation
 pub fn video_job_test() {
   let job =
-    types.VideoJob(
+    VideoJob(
       id: types.new_job_id("job-1"),
       url: "https://example.com/video",
-      status: types.Pending,
+      status: Pending,
       path: None,
       title: None,
       thumbnail_url: None,

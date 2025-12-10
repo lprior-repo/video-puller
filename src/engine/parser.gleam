@@ -2,7 +2,7 @@
 ///
 /// Parses yt-dlp progress output to extract download percentage and status.
 /// Uses regex to match progress patterns like "[download] 45.3% of 100.00MiB"
-import domain/types.{
+import domain/core_types.{
   type FormatOption, type VideoMetadata, FormatOption, VideoMetadata,
 }
 import gleam/list

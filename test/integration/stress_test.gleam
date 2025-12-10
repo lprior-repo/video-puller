@@ -6,7 +6,7 @@
 /// - List operations remain performant
 /// - Status transitions work correctly at scale
 /// - Memory usage stays reasonable
-import domain/types
+import domain/core_types
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
@@ -35,7 +35,7 @@ pub fn queue_fill_100_jobs_test() {
 
   list.range(1, job_count)
   |> list.each(fn(i) {
-    let job_id = types.new_job_id("stress-" <> int.to_string(i))
+    let job_id = core_types.new_job_id("stress-" <> int.to_string(i))
     let url = "https://youtube.com/watch?v=video" <> int.to_string(i)
     repo.insert_job(conn, job_id, url, base_timestamp + i) |> should.be_ok()
   })
@@ -67,7 +67,7 @@ pub fn queue_fill_500_jobs_test() {
 
   list.range(1, job_count)
   |> list.each(fn(i) {
-    let job_id = types.new_job_id("bulk-" <> int.to_string(i))
+    let job_id = core_types.new_job_id("bulk-" <> int.to_string(i))
     let url = "https://vimeo.com/" <> int.to_string(i)
     repo.insert_job(conn, job_id, url, base_timestamp + i) |> should.be_ok()
   })
@@ -96,7 +96,7 @@ pub fn mixed_status_transitions_test() {
   // Insert all jobs
   list.range(1, job_count)
   |> list.each(fn(i) {
-    let job_id = types.new_job_id("trans-" <> int.to_string(i))
+    let job_id = core_types.new_job_id("trans-" <> int.to_string(i))
     let url = "https://test.com/" <> int.to_string(i)
     repo.insert_job(conn, job_id, url, base_timestamp) |> should.be_ok()
   })
@@ -110,19 +110,24 @@ pub fn mixed_status_transitions_test() {
   // Complete jobs 1-15
   list.range(1, 15)
   |> list.each(fn(i) {
-    let job_id = types.new_job_id("trans-" <> int.to_string(i))
-    repo.update_status(conn, job_id, types.Completed, base_timestamp + 1000)
+    let job_id = core_types.new_job_id("trans-" <> int.to_string(i))
+    repo.update_status(
+      conn,
+      job_id,
+      core_types.Completed,
+      base_timestamp + 1000,
+    )
     |> should.be_ok()
   })
 
   // Fail jobs 16-30
   list.range(16, 30)
   |> list.each(fn(i) {
-    let job_id = types.new_job_id("trans-" <> int.to_string(i))
+    let job_id = core_types.new_job_id("trans-" <> int.to_string(i))
     repo.update_status(
       conn,
       job_id,
-      types.Failed("Test failure " <> int.to_string(i)),
+      core_types.Failed("Test failure " <> int.to_string(i)),
       base_timestamp + 1000,
     )
     |> should.be_ok()
@@ -131,13 +136,13 @@ pub fn mixed_status_transitions_test() {
   // Set jobs 31-40 to downloading with varying progress
   list.range(31, 40)
   |> list.each(fn(i) {
-    let job_id = types.new_job_id("trans-" <> int.to_string(i))
+    let job_id = core_types.new_job_id("trans-" <> int.to_string(i))
     let progress = { i - 30 } * 10
     // 10%, 20%, ... 100%
     repo.update_status(
       conn,
       job_id,
-      types.Downloading(progress),
+      core_types.Downloading(progress),
       base_timestamp + 1000,
     )
     |> should.be_ok()
@@ -189,7 +194,7 @@ pub fn zombie_reset_at_scale_test() {
 
   list.range(1, zombie_count)
   |> list.each(fn(i) {
-    let job_id = types.new_job_id("zombie-" <> int.to_string(i))
+    let job_id = core_types.new_job_id("zombie-" <> int.to_string(i))
     let url = "https://zombie.test/" <> int.to_string(i)
     repo.insert_job(conn, job_id, url, base_timestamp) |> should.be_ok()
 
@@ -198,7 +203,7 @@ pub fn zombie_reset_at_scale_test() {
     repo.update_status(
       conn,
       job_id,
-      types.Downloading(progress),
+      core_types.Downloading(progress),
       base_timestamp + 100,
     )
     |> should.be_ok()
@@ -239,7 +244,7 @@ pub fn rapid_status_updates_test() {
   migrator.run_migrations(conn) |> should.be_ok()
 
   // Create one job and rapidly update its status
-  let job_id = types.new_job_id("rapid-001")
+  let job_id = core_types.new_job_id("rapid-001")
   repo.insert_job(conn, job_id, "https://rapid.test/video", 1_000_000)
   |> should.be_ok()
 
@@ -249,21 +254,22 @@ pub fn rapid_status_updates_test() {
     repo.update_status(
       conn,
       job_id,
-      types.Downloading(progress),
+      core_types.Downloading(progress),
       1_000_000 + progress,
     )
     |> should.be_ok()
   })
 
   // Complete the job
-  repo.update_status(conn, job_id, types.Completed, 1_000_101) |> should.be_ok()
+  repo.update_status(conn, job_id, core_types.Completed, 1_000_101)
+  |> should.be_ok()
 
   // Verify final state
   let jobs = repo.list_jobs(conn, Some("completed")) |> should.be_ok()
   list.length(jobs) |> should.equal(1)
 
   let job = list.first(jobs) |> should.be_ok()
-  job.status |> should.equal(types.Completed)
+  job.status |> should.equal(core_types.Completed)
 
   // Cleanup
   let _ = db.close(conn)
@@ -284,7 +290,7 @@ pub fn metadata_updates_at_scale_test() {
 
   list.range(1, job_count)
   |> list.each(fn(i) {
-    let job_id = types.new_job_id("meta-" <> int.to_string(i))
+    let job_id = core_types.new_job_id("meta-" <> int.to_string(i))
     let url = "https://meta.test/" <> int.to_string(i)
     repo.insert_job(conn, job_id, url, base_timestamp) |> should.be_ok()
 

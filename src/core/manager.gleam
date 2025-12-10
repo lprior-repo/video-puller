@@ -6,13 +6,12 @@
 /// - BEAM-native scheduling (no infinite recursion)
 /// - Backpressure awareness
 /// - Graceful degradation under load
+import core/pool_types.{type WorkerPoolSubject}
 import core/worker_pool
-import domain/types.{
-  type JobId, type ManagerMessage, ManagerStats, SetSelf, SetWorkerPool,
-}
+import domain/core_types
+import domain/types.{type JobId, type ManagerMessage, SetSelf, SetWorkerPool}
 import engine/ytdlp
 import gleam/dict.{type Dict}
-import gleam/dynamic
 import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/io
@@ -32,12 +31,12 @@ pub opaque type ManagerState {
     // Active downloads tracked by job_id
     active_downloads: Dict(String, ActiveDownload),
     max_concurrency: Int,
-    // Worker pool for supervised download execution
-    worker_pool: Option(Subject(worker_pool.PoolMessage)),
+    // Worker pool for supervised download execution - properly typed
+    worker_pool: Option(WorkerPoolSubject),
     // Self reference for scheduling
     self: Option(Subject(ManagerMessage)),
     // Statistics for monitoring
-    stats: types.ManagerStats,
+    stats: core_types.ManagerStats,
   )
 }
 
@@ -62,7 +61,7 @@ pub fn start(
       max_concurrency: max_concurrency,
       worker_pool: None,
       self: None,
-      stats: types.ManagerStats(
+      stats: core_types.ManagerStats(
         total_dispatched: 0,
         total_completed: 0,
         total_failed: 0,
@@ -93,8 +92,8 @@ pub fn start(
           <> int.to_string(max_workers)
           <> ")",
         )
-        // Use dynamic to store the pool subject (avoids circular type dependency)
-        process.send(subject, SetWorkerPool(pool_to_dynamic(pool)))
+        // Properly typed - no dynamic coercion needed
+        process.send(subject, SetWorkerPool(pool))
       }
       Error(_) -> {
         io.println("⚠️  Failed to start worker pool, using fallback mode")
@@ -124,7 +123,7 @@ fn handle_message(
       }
 
       let updated_stats =
-        types.ManagerStats(
+        core_types.ManagerStats(
           ..new_state.stats,
           polls_executed: new_state.stats.polls_executed + 1,
         )
@@ -143,13 +142,13 @@ fn handle_message(
         True -> {
           let updated_active = dict.delete(state.active_downloads, job_id_str)
           let updated_stats = case status {
-            types.Completed ->
-              types.ManagerStats(
+            core_types.Completed ->
+              core_types.ManagerStats(
                 ..state.stats,
                 total_completed: state.stats.total_completed + 1,
               )
-            types.Failed(_) ->
-              types.ManagerStats(
+            core_types.Failed(_) ->
+              core_types.ManagerStats(
                 ..state.stats,
                 total_failed: state.stats.total_failed + 1,
               )
@@ -171,7 +170,7 @@ fn handle_message(
         repo.update_status(
           state.db,
           job_id,
-          types.Downloading(progress),
+          core_types.Downloading(progress),
           timestamp,
         )
       actor.continue(state)
@@ -182,7 +181,7 @@ fn handle_message(
 
       // Shutdown worker pool gracefully
       case state.worker_pool {
-        Some(pool) -> process.send(pool, worker_pool.Shutdown)
+        Some(pool) -> process.send(pool, pool_types.Shutdown)
         None -> Nil
       }
 
@@ -193,14 +192,10 @@ fn handle_message(
       actor.continue(ManagerState(..state, self: Some(subject)))
     }
 
-    SetWorkerPool(pool_dynamic) -> {
-      // Decode the dynamic pool subject
-      case unsafe_coerce_pool(pool_dynamic) {
-        pool -> {
-          io.println("📦 Worker pool registered with manager")
-          actor.continue(ManagerState(..state, worker_pool: Some(pool)))
-        }
-      }
+    SetWorkerPool(pool) -> {
+      // Pool is now properly typed - no coercion needed
+      io.println("📦 Worker pool registered with manager")
+      actor.continue(ManagerState(..state, worker_pool: Some(pool)))
     }
 
     types.GetStats(reply) -> {
@@ -236,7 +231,7 @@ fn poll_and_dispatch(state: ManagerState) -> ManagerState {
               let #(active, count) = acc
 
               // Submit to worker pool
-              process.send(pool, worker_pool.SubmitJob(job.id, job.url))
+              process.send(pool, pool_types.SubmitJob(job.id, job.url))
 
               io.println(
                 "📤 Submitted to pool: "
@@ -257,7 +252,7 @@ fn poll_and_dispatch(state: ManagerState) -> ManagerState {
             })
 
           let new_stats =
-            ManagerStats(
+            core_types.ManagerStats(
               ..state.stats,
               total_dispatched: state.stats.total_dispatched + dispatched_count,
             )
@@ -310,7 +305,7 @@ fn fallback_dispatch(state: ManagerState, available_slots: Int) -> ManagerState 
             })
 
           let new_stats =
-            ManagerStats(
+            core_types.ManagerStats(
               ..state.stats,
               total_dispatched: state.stats.total_dispatched + dispatched_count,
             )
@@ -350,7 +345,7 @@ fn run_download_fallback(
             manager_subject,
             types.JobStatusUpdate(
               job_id,
-              types.Failed("Download timeout exceeded"),
+              core_types.Failed("Download timeout exceeded"),
             ),
           )
         }
@@ -361,7 +356,7 @@ fn run_download_fallback(
         manager_subject,
         types.JobStatusUpdate(
           job_id,
-          types.Failed("Failed to start downloader"),
+          core_types.Failed("Failed to start downloader"),
         ),
       )
     }
@@ -378,9 +373,9 @@ fn schedule_poll(manager: Subject(ManagerMessage), interval_ms: Int) -> Nil {
 /// Convert download result to video status
 fn result_to_status(result: types.DownloadResult) -> types.VideoStatus {
   case result {
-    types.DownloadComplete(_, _) -> types.Completed
-    types.DownloadFailed(_, reason) -> types.Failed(reason)
-    _ -> types.Completed
+    core_types.DownloadComplete(_, _) -> core_types.Completed
+    core_types.DownloadFailed(_, reason) -> core_types.Failed(reason)
+    _ -> core_types.Completed
   }
 }
 
@@ -394,17 +389,6 @@ fn send_after(
   delay_ms: Int,
   message: ManagerMessage,
 ) -> Result(Nil, Nil)
-
-/// Convert pool subject to dynamic
-/// This is necessary because of circular type dependencies
-@external(erlang, "erlang", "id")
-fn pool_to_dynamic(pool: Subject(worker_pool.PoolMessage)) -> dynamic.Dynamic
-
-/// Unsafe coercion of dynamic to pool subject
-/// This is necessary because of circular type dependencies
-/// We use Erlang's identity function to bypass the type system
-@external(erlang, "erlang", "id")
-fn unsafe_coerce_pool(d: dynamic.Dynamic) -> Subject(worker_pool.PoolMessage)
 
 // Downloader FFI (to avoid circular imports)
 @external(erlang, "engine@downloader", "start")

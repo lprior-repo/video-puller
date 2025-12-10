@@ -2,11 +2,14 @@
 ///
 /// Server-side rendered HTML templates for the video puller UI.
 /// Uses Lustre's element API for type-safe HTML generation.
+import domain/core_types.{
+  type VideoStatus, Completed, Downloading, Failed, Pending, job_id_to_string,
+}
 import domain/subscription_types.{
   type PollResult, type SeenVideo, type SubscriptionConfig,
   type SubscriptionStatus,
 }
-import domain/types.{type VideoJob, type VideoStatus}
+import domain/types.{type VideoJob}
 import engine/video_filter
 import gleam/int
 import gleam/list
@@ -770,7 +773,7 @@ fn history_card(job: VideoJob) -> Element(a) {
       div([], [
         p([class("font-semibold")], [text(truncate_url(job.url, 60))]),
         p([class("text-sm text-gray-400")], [
-          text("ID: " <> types.job_id_to_string(job.id)),
+          text("ID: " <> job_id_to_string(job.id)),
         ]),
         case job.path {
           option.Some(path) ->
@@ -784,13 +787,13 @@ fn history_card(job: VideoJob) -> Element(a) {
       div([class("flex items-center gap-4")], [
         status_badge(job.status),
         case job.status {
-          types.Failed(_) -> retry_button(job.url)
+          Failed(_) -> retry_button(job.url)
           _ -> div([], [])
         },
       ]),
     ]),
     case job.status {
-      types.Failed(reason) ->
+      Failed(reason) ->
         p([class("text-sm text-red-400 mt-2")], [text("Error: " <> reason)])
       _ -> div([], [])
     },
@@ -846,7 +849,7 @@ fn job_card(job: VideoJob) -> Element(a) {
       div([], [
         p([class("font-semibold")], [text(truncate_url(job.url, 60))]),
         p([class("text-sm text-gray-400")], [
-          text("ID: " <> types.job_id_to_string(job.id)),
+          text("ID: " <> job_id_to_string(job.id)),
         ]),
       ]),
       status_badge(job.status),
@@ -878,13 +881,13 @@ fn string_slice(s: String, start: Int, length: Int) -> String
 /// Status badge component
 fn status_badge(status: VideoStatus) -> Element(a) {
   let #(status_text, badge_class) = case status {
-    types.Pending -> #("Pending", "status-badge status-pending")
-    types.Downloading(progress) -> #(
+    Pending -> #("Pending", "status-badge status-pending")
+    Downloading(progress) -> #(
       "Downloading " <> int.to_string(progress) <> "%",
       "status-badge status-downloading",
     )
-    types.Completed -> #("Completed", "status-badge status-completed")
-    types.Failed(_reason) -> #("Failed", "status-badge status-failed")
+    Completed -> #("Completed", "status-badge status-completed")
+    Failed(_reason) -> #("Failed", "status-badge status-failed")
   }
 
   span([class(badge_class)], [text(status_text)])
@@ -893,7 +896,7 @@ fn status_badge(status: VideoStatus) -> Element(a) {
 /// Progress bar section based on status
 fn progress_section(status: VideoStatus) -> Element(a) {
   case status {
-    types.Downloading(progress) ->
+    Downloading(progress) ->
       div([class("progress-bar")], [
         div(
           [
@@ -903,7 +906,7 @@ fn progress_section(status: VideoStatus) -> Element(a) {
           [],
         ),
       ])
-    types.Failed(reason) ->
+    Failed(reason) ->
       p([class("text-sm text-red-400 mt-2")], [text("Error: " <> reason)])
     _ -> div([], [])
   }
@@ -1029,22 +1032,22 @@ pub fn error_page(code: Int, message: String) -> Element(a) {
 /// Maps VideoJob status to display with neon pink styling
 pub fn download_card(job: VideoJob) -> Element(a) {
   let #(card_class, status_text, status_class) = case job.status {
-    types.Pending -> #(
+    Pending -> #(
       "download-card download-card-queued",
       "Queued",
       "status-text-queued",
     )
-    types.Downloading(_) -> #(
+    Downloading(_) -> #(
       "download-card",
       "Downloading...",
       "status-text-downloading",
     )
-    types.Completed -> #(
+    Completed -> #(
       "download-card download-card-completed",
       "Complete",
       "status-text-completed",
     )
-    types.Failed(_) -> #(
+    Failed(_) -> #(
       "download-card download-card-failed",
       "Failed",
       "status-text-failed",
@@ -1064,7 +1067,7 @@ pub fn download_card(job: VideoJob) -> Element(a) {
 /// Thick progress bar with oversized percentage display
 fn thick_progress_bar(status: VideoStatus) -> Element(a) {
   case status {
-    types.Downloading(progress) -> {
+    Downloading(progress) -> {
       let progress_str = int.to_string(progress)
       div([class("thick-progress-container")], [
         div(
@@ -1077,7 +1080,7 @@ fn thick_progress_bar(status: VideoStatus) -> Element(a) {
         span([class("percentage-display")], [text(progress_str <> "%")]),
       ])
     }
-    types.Pending -> {
+    Pending -> {
       div([class("thick-progress-container")], [
         div(
           [class("thick-progress-fill-gray"), attribute("style", "width: 0%")],
@@ -1086,7 +1089,7 @@ fn thick_progress_bar(status: VideoStatus) -> Element(a) {
         span([class("percentage-display percentage-display-gray")], [text("0%")]),
       ])
     }
-    types.Completed -> {
+    Completed -> {
       div([class("thick-progress-container")], [
         div(
           [class("thick-progress-fill"), attribute("style", "width: 100%")],
@@ -1095,14 +1098,14 @@ fn thick_progress_bar(status: VideoStatus) -> Element(a) {
         span([class("percentage-display")], [text("100%")]),
       ])
     }
-    types.Failed(_) -> div([], [])
+    Failed(_) -> div([], [])
   }
 }
 
 /// Speed and status data in green monospace
 fn speed_status_data(status: VideoStatus) -> Element(a) {
   case status {
-    types.Downloading(progress) -> {
+    Downloading(progress) -> {
       let speed = "Speed: 25.4 MB/s"
       div([class("speed-data")], [
         text(
@@ -1114,17 +1117,17 @@ fn speed_status_data(status: VideoStatus) -> Element(a) {
         ),
       ])
     }
-    types.Pending -> {
+    Pending -> {
       div([class("speed-data speed-data-gray")], [
         text("Status: Pending Start | Estimated Size: Unknown"),
       ])
     }
-    types.Completed -> {
+    Completed -> {
       div([class("speed-data")], [
         text("Status: Complete | Downloaded Successfully"),
       ])
     }
-    types.Failed(reason) -> {
+    Failed(reason) -> {
       div([class("speed-data status-text-failed")], [
         text("Status: Failed | Error: " <> reason),
       ])

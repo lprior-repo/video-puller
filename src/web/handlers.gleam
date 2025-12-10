@@ -3,6 +3,7 @@
 /// Contains all the request handlers for the web application.
 /// Handlers interact with the database through the context.
 import core/subscription_manager
+import domain/core_types.{Completed, Failed}
 import domain/subscription_types.{type SubscriptionStatus}
 import domain/types
 import engine/shell
@@ -133,7 +134,7 @@ pub fn history(_req: Request, ctx: Context) -> Response {
       let history_jobs =
         list.filter(all_jobs, fn(job) {
           case job.status {
-            types.Completed | types.Failed(_) -> True
+            Completed | Failed(_) -> True
             _ -> False
           }
         })

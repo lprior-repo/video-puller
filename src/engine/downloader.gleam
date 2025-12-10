@@ -2,7 +2,10 @@
 ///
 /// OTP actor that handles individual video download jobs.
 /// Receives commands to start downloads and reports progress/completion.
-import domain/types.{type DownloadResult, type JobId}
+import domain/core_types.{DownloadComplete, DownloadFailed}
+import domain/types.{
+  type DownloadResult, type JobId, type ManagerMessage, UpdateProgress,
+}
 import engine/parser
 import engine/shell
 import engine/ytdlp
@@ -22,7 +25,7 @@ pub type DownloaderMessage {
     job_id: JobId,
     url: String,
     reply: Subject(DownloadResult),
-    progress_subject: Subject(types.ManagerMessage),
+    progress_subject: Subject(ManagerMessage),
   )
   Shutdown
 }
@@ -69,7 +72,7 @@ fn execute_download_streaming(
   job_id: JobId,
   url: String,
   config: ytdlp.DownloadConfig,
-  progress_subject: Subject(types.ManagerMessage),
+  progress_subject: Subject(ManagerMessage),
 ) -> DownloadResult {
   // Build command arguments
   case ytdlp.build_download_args(url, job_id, config, option.None) {
@@ -83,7 +86,7 @@ fn execute_download_streaming(
               // Only send update if progress changed
               process.send(
                 progress_subject,
-                types.UpdateProgress(job_id, progress_info.percentage),
+                UpdateProgress(job_id, progress_info.percentage),
               )
             }
             Error(_) -> Nil
@@ -96,19 +99,19 @@ fn execute_download_streaming(
             0 -> {
               // Success - use configured output directory
               let path = config.output_directory <> "/download_complete"
-              types.DownloadComplete(job_id, path)
+              DownloadComplete(job_id, path)
             }
             _ -> {
-              types.DownloadFailed(job_id, "Download failed with exit code")
+              DownloadFailed(job_id, "Download failed with exit code")
             }
           }
         }
         Error(shell.ExecutionError(msg)) ->
-          types.DownloadFailed(job_id, "Execution error: " <> msg)
+          DownloadFailed(job_id, "Execution error: " <> msg)
         Error(shell.InvalidCommand(msg)) ->
-          types.DownloadFailed(job_id, "Invalid command: " <> msg)
+          DownloadFailed(job_id, "Invalid command: " <> msg)
       }
     }
-    Error(msg) -> types.DownloadFailed(job_id, "Invalid URL: " <> msg)
+    Error(msg) -> DownloadFailed(job_id, "Invalid URL: " <> msg)
   }
 }

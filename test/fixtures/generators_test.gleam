@@ -1,4 +1,5 @@
 /// Tests for Type Generators
+import domain/core_types
 import domain/types
 import fixtures/generators
 import gleam/list
@@ -34,20 +35,20 @@ pub fn unique_job_id_test() {
 // ============================================================================
 
 pub fn pending_status_test() {
-  generators.pending_status() |> should.equal(types.Pending)
+  generators.pending_status() |> should.equal(core_types.Pending)
 }
 
 pub fn downloading_status_test() {
-  generators.downloading_status(75) |> should.equal(types.Downloading(75))
+  generators.downloading_status(75) |> should.equal(core_types.Downloading(75))
 }
 
 pub fn completed_status_test() {
-  generators.completed_status() |> should.equal(types.Completed)
+  generators.completed_status() |> should.equal(core_types.Completed)
 }
 
 pub fn failed_status_test() {
   generators.failed_status("Network error")
-  |> should.equal(types.Failed("Network error"))
+  |> should.equal(core_types.Failed("Network error"))
 }
 
 // ============================================================================
@@ -57,23 +58,23 @@ pub fn failed_status_test() {
 pub fn video_job_test() {
   let job = generators.video_job("test-1", "https://example.com/video")
 
-  types.job_id_to_string(job.id) |> should.equal("test-1")
+  core_types.job_id_to_string(job.id) |> should.equal("test-1")
   job.url |> should.equal("https://example.com/video")
-  job.status |> should.equal(types.Pending)
+  job.status |> should.equal(core_types.Pending)
   job.path |> should.equal(None)
 }
 
 pub fn pending_job_test() {
   let job = generators.pending_job("p-1", "https://youtube.com/watch?v=abc")
 
-  job.status |> should.equal(types.Pending)
+  job.status |> should.equal(core_types.Pending)
 }
 
 pub fn downloading_job_test() {
   let job = generators.downloading_job("d-1", "https://vimeo.com/123", 45)
 
   case job.status {
-    types.Downloading(progress) -> progress |> should.equal(45)
+    core_types.Downloading(progress) -> progress |> should.equal(45)
     _ -> should.fail()
   }
 }
@@ -82,7 +83,7 @@ pub fn completed_job_test() {
   let job =
     generators.completed_job("c-1", "https://url.com", "/downloads/c-1.mp4")
 
-  job.status |> should.equal(types.Completed)
+  job.status |> should.equal(core_types.Completed)
   job.path |> should.equal(Some("/downloads/c-1.mp4"))
 }
 
@@ -90,7 +91,7 @@ pub fn failed_job_test() {
   let job = generators.failed_job("f-1", "https://url.com", "404 Not Found")
 
   case job.status {
-    types.Failed(reason) -> reason |> should.equal("404 Not Found")
+    core_types.Failed(reason) -> reason |> should.equal("404 Not Found")
     _ -> should.fail()
   }
 }
@@ -104,8 +105,8 @@ pub fn start_download_cmd_test() {
   let cmd = generators.start_download_cmd(job_id, "https://test.com")
 
   case cmd {
-    types.StartDownload(id, url) -> {
-      types.job_id_to_string(id) |> should.equal("cmd-test")
+    core_types.StartDownload(id, url) -> {
+      core_types.job_id_to_string(id) |> should.equal("cmd-test")
       url |> should.equal("https://test.com")
     }
     _ -> should.fail()
@@ -117,8 +118,8 @@ pub fn cancel_download_cmd_test() {
   let cmd = generators.cancel_download_cmd(job_id)
 
   case cmd {
-    types.CancelDownload(id) ->
-      types.job_id_to_string(id) |> should.equal("cancel-test")
+    core_types.CancelDownload(id) ->
+      core_types.job_id_to_string(id) |> should.equal("cancel-test")
     _ -> should.fail()
   }
 }
@@ -132,8 +133,8 @@ pub fn download_started_test() {
   let result = generators.download_started(job_id)
 
   case result {
-    types.DownloadStarted(id) ->
-      types.job_id_to_string(id) |> should.equal("started-1")
+    core_types.DownloadStarted(id) ->
+      core_types.job_id_to_string(id) |> should.equal("started-1")
     _ -> should.fail()
   }
 }
@@ -143,8 +144,8 @@ pub fn download_progress_test() {
   let result = generators.download_progress(job_id, 50)
 
   case result {
-    types.DownloadProgress(id, progress) -> {
-      types.job_id_to_string(id) |> should.equal("progress-1")
+    core_types.DownloadProgress(id, progress) -> {
+      core_types.job_id_to_string(id) |> should.equal("progress-1")
       progress |> should.equal(50)
     }
     _ -> should.fail()
@@ -156,8 +157,8 @@ pub fn download_complete_test() {
   let result = generators.download_complete(job_id, "/path/to/video.mp4")
 
   case result {
-    types.DownloadComplete(id, path) -> {
-      types.job_id_to_string(id) |> should.equal("complete-1")
+    core_types.DownloadComplete(id, path) -> {
+      core_types.job_id_to_string(id) |> should.equal("complete-1")
       path |> should.equal("/path/to/video.mp4")
     }
     _ -> should.fail()
@@ -178,12 +179,12 @@ pub fn shutdown_msg_test() {
 
 pub fn status_update_msg_test() {
   let job_id = generators.job_id("update-1")
-  let msg = generators.status_update_msg(job_id, types.Completed)
+  let msg = generators.status_update_msg(job_id, core_types.Completed)
 
   case msg {
     types.JobStatusUpdate(id, status) -> {
-      types.job_id_to_string(id) |> should.equal("update-1")
-      status |> should.equal(types.Completed)
+      core_types.job_id_to_string(id) |> should.equal("update-1")
+      status |> should.equal(core_types.Completed)
     }
     _ -> should.fail()
   }
@@ -239,7 +240,7 @@ pub fn pending_jobs_test() {
 
   // All should be pending
   jobs
-  |> list.all(fn(job) { job.status == types.Pending })
+  |> list.all(fn(job) { job.status == core_types.Pending })
   |> should.be_true()
 }
 
@@ -250,9 +251,13 @@ pub fn mixed_status_jobs_test() {
 
   // Should have variety of statuses
   let pending_count =
-    jobs |> list.filter(fn(j) { j.status == types.Pending }) |> list.length()
+    jobs
+    |> list.filter(fn(j) { j.status == core_types.Pending })
+    |> list.length()
   let completed_count =
-    jobs |> list.filter(fn(j) { j.status == types.Completed }) |> list.length()
+    jobs
+    |> list.filter(fn(j) { j.status == core_types.Completed })
+    |> list.length()
 
   pending_count |> should.equal(2)
   completed_count |> should.equal(2)

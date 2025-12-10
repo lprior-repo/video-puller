@@ -7,7 +7,16 @@
 /// - Dynamic scaling based on load
 ///
 /// This is the heart of the massive parallelism support.
-import domain/types.{type DownloadResult, type JobId, type ManagerMessage}
+import core/pool_types.{
+  type PoolMessage, type PoolStats, GetStatus, HealthCheck, PoolStats,
+  PoolStatus, ProcessQueue, ScaleWorkers, SetSelf, Shutdown, SubmitJob,
+  WorkerDone, WorkerFailed,
+}
+import domain/core_types.{
+  type DownloadResult, type JobId, Completed, DownloadComplete, DownloadFailed,
+  Failed, job_id_to_string,
+}
+import domain/types.{type ManagerMessage, JobStatusUpdate}
 import engine/downloader
 import engine/ytdlp
 import gleam/dict.{type Dict}
@@ -53,48 +62,8 @@ pub type PendingWork {
   PendingWork(job_id: JobId, url: String, queued_at: Int)
 }
 
-/// Pool statistics for adaptive scaling
-pub type PoolStats {
-  PoolStats(
-    total_completed: Int,
-    total_failed: Int,
-    avg_completion_time_ms: Int,
-    queue_high_water_mark: Int,
-  )
-}
-
-/// Messages the pool can receive
-pub type PoolMessage {
-  // Submit a download job to the pool
-  SubmitJob(job_id: JobId, url: String)
-  // Worker completed a job
-  WorkerDone(worker_id: String, job_id: JobId, result: DownloadResult)
-  // Worker failed/crashed
-  WorkerFailed(worker_id: String, job_id: JobId, reason: String)
-  // Scale workers up/down
-  ScaleWorkers(target: Int)
-  // Get pool status
-  GetStatus(reply: Subject(PoolStatus))
-  // Process work queue (internal)
-  ProcessQueue
-  // Periodic health check
-  HealthCheck
-  // Set self reference
-  SetSelf(Subject(PoolMessage))
-  // Shutdown gracefully
-  Shutdown
-}
-
-/// Pool status for monitoring
-pub type PoolStatus {
-  PoolStatus(
-    available_workers: Int,
-    busy_workers: Int,
-    queue_depth: Int,
-    total_workers: Int,
-    stats: PoolStats,
-  )
-}
+// PoolStats, PoolMessage, and PoolStatus are now defined in core/pool_types.gleam
+// to break the circular dependency with domain/types.gleam
 
 /// Messages for individual workers
 pub type WorkerMessage {
@@ -255,7 +224,7 @@ fn handle_pool_message(
         "✅ Worker "
         <> worker_id
         <> " completed job "
-        <> types.job_id_to_string(job_id),
+        <> job_id_to_string(job_id),
       )
 
       // Update stats
@@ -270,14 +239,11 @@ fn handle_pool_message(
         Ok(info) -> {
           // Notify manager of completion
           let status = case result {
-            types.DownloadComplete(_, _) -> types.Completed
-            types.DownloadFailed(_, reason) -> types.Failed(reason)
-            _ -> types.Completed
+            DownloadComplete(_, _) -> Completed
+            DownloadFailed(_, reason) -> Failed(reason)
+            _ -> Completed
           }
-          process.send(
-            state.manager_subject,
-            types.JobStatusUpdate(job_id, status),
-          )
+          process.send(state.manager_subject, JobStatusUpdate(job_id, status))
 
           // Return worker to available pool
           let new_available = [info.worker, ..state.available_workers]
@@ -311,7 +277,7 @@ fn handle_pool_message(
         "❌ Worker "
         <> worker_id
         <> " failed on job "
-        <> types.job_id_to_string(job_id)
+        <> job_id_to_string(job_id)
         <> ": "
         <> reason,
       )
@@ -323,7 +289,7 @@ fn handle_pool_message(
       // Notify manager of failure
       process.send(
         state.manager_subject,
-        types.JobStatusUpdate(job_id, types.Failed(reason)),
+        JobStatusUpdate(job_id, Failed(reason)),
       )
 
       // Remove from busy workers
@@ -465,16 +431,13 @@ fn handle_pool_message(
             "⚠️  Worker "
             <> worker_id
             <> " appears stuck on job "
-            <> types.job_id_to_string(info.job_id),
+            <> job_id_to_string(info.job_id),
           )
 
           // Mark job as failed and remove from busy
           process.send(
             st.manager_subject,
-            types.JobStatusUpdate(
-              info.job_id,
-              types.Failed("Download timeout exceeded"),
-            ),
+            JobStatusUpdate(info.job_id, Failed("Download timeout exceeded")),
           )
 
           // Try to shutdown the stuck worker
@@ -577,7 +540,7 @@ fn handle_worker_message(
         "🔄 Worker "
         <> worker_id
         <> " starting download: "
-        <> types.job_id_to_string(job_id),
+        <> job_id_to_string(job_id),
       )
 
       // Execute the download with proper error handling

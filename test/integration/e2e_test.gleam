@@ -2,7 +2,7 @@
 ///
 /// Tests the complete happy path from job creation to completion.
 /// I-001: End-to-End Test (Happy Path)
-import domain/types
+import domain/core_types
 import gleam/list
 import gleam/option.{None, Some}
 import gleeunit
@@ -33,7 +33,7 @@ pub fn happy_path_workflow_test() {
   migrator.run_migrations(conn) |> should.be_ok()
 
   // 1. Create a job
-  let job_id = types.new_job_id("test-job-001")
+  let job_id = core_types.new_job_id("test-job-001")
   let url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
   let timestamp = 1_000_000
 
@@ -44,12 +44,12 @@ pub fn happy_path_workflow_test() {
   list.length(jobs) |> should.equal(1)
 
   let job = list.first(jobs) |> should.be_ok()
-  types.job_id_to_string(job.id) |> should.equal("test-job-001")
+  core_types.job_id_to_string(job.id) |> should.equal("test-job-001")
   job.url |> should.equal(url)
-  job.status |> should.equal(types.Pending)
+  job.status |> should.equal(core_types.Pending)
 
   // 3. Update to downloading with progress
-  repo.update_status(conn, job_id, types.Downloading(50), timestamp + 100)
+  repo.update_status(conn, job_id, core_types.Downloading(50), timestamp + 100)
   |> should.be_ok()
 
   let jobs_downloading =
@@ -58,12 +58,12 @@ pub fn happy_path_workflow_test() {
 
   let downloading_job = list.first(jobs_downloading) |> should.be_ok()
   case downloading_job.status {
-    types.Downloading(progress) -> progress |> should.equal(50)
+    core_types.Downloading(progress) -> progress |> should.equal(50)
     _ -> should.fail()
   }
 
   // 4. Update to completed
-  repo.update_status(conn, job_id, types.Completed, timestamp + 200)
+  repo.update_status(conn, job_id, core_types.Completed, timestamp + 200)
   |> should.be_ok()
 
   // Set the output path
@@ -75,7 +75,7 @@ pub fn happy_path_workflow_test() {
   list.length(jobs_completed) |> should.equal(1)
 
   let completed_job = list.first(jobs_completed) |> should.be_ok()
-  completed_job.status |> should.equal(types.Completed)
+  completed_job.status |> should.equal(core_types.Completed)
   completed_job.path |> should.equal(Some("/downloads/video.mp4"))
 
   // Cleanup
@@ -92,9 +92,9 @@ pub fn multiple_jobs_test() {
   migrator.run_migrations(conn) |> should.be_ok()
 
   // Create multiple jobs
-  let job1 = types.new_job_id("job-001")
-  let job2 = types.new_job_id("job-002")
-  let job3 = types.new_job_id("job-003")
+  let job1 = core_types.new_job_id("job-001")
+  let job2 = core_types.new_job_id("job-002")
+  let job3 = core_types.new_job_id("job-003")
 
   repo.insert_job(conn, job1, "https://youtube.com/1", 1000) |> should.be_ok()
   repo.insert_job(conn, job2, "https://youtube.com/2", 1001) |> should.be_ok()
@@ -105,10 +105,10 @@ pub fn multiple_jobs_test() {
   list.length(pending_jobs) |> should.equal(3)
 
   // Complete one job
-  repo.update_status(conn, job1, types.Completed, 2000) |> should.be_ok()
+  repo.update_status(conn, job1, core_types.Completed, 2000) |> should.be_ok()
 
   // Fail one job
-  repo.update_status(conn, job2, types.Failed("Network error"), 2000)
+  repo.update_status(conn, job2, core_types.Failed("Network error"), 2000)
   |> should.be_ok()
 
   // Verify counts
@@ -145,17 +145,19 @@ pub fn zombie_recovery_test() {
   migrator.run_migrations(conn) |> should.be_ok()
 
   // Create jobs in different states
-  let job1 = types.new_job_id("zombie-001")
-  let job2 = types.new_job_id("zombie-002")
-  let job3 = types.new_job_id("normal-001")
+  let job1 = core_types.new_job_id("zombie-001")
+  let job2 = core_types.new_job_id("zombie-002")
+  let job3 = core_types.new_job_id("normal-001")
 
   repo.insert_job(conn, job1, "https://youtube.com/1", 1000) |> should.be_ok()
   repo.insert_job(conn, job2, "https://youtube.com/2", 1000) |> should.be_ok()
   repo.insert_job(conn, job3, "https://youtube.com/3", 1000) |> should.be_ok()
 
   // Set two jobs to "downloading" (simulating crash mid-download)
-  repo.update_status(conn, job1, types.Downloading(30), 1100) |> should.be_ok()
-  repo.update_status(conn, job2, types.Downloading(75), 1100) |> should.be_ok()
+  repo.update_status(conn, job1, core_types.Downloading(30), 1100)
+  |> should.be_ok()
+  repo.update_status(conn, job2, core_types.Downloading(75), 1100)
+  |> should.be_ok()
   // job3 stays pending
 
   // Verify we have 2 downloading jobs
@@ -197,13 +199,13 @@ pub fn idempotency_test() {
   migrator.run_migrations(conn) |> should.be_ok()
 
   // Create a job
-  let job_id = types.new_job_id("idem-001")
+  let job_id = core_types.new_job_id("idem-001")
   repo.insert_job(conn, job_id, "https://test.com", 1000) |> should.be_ok()
 
   // Update status multiple times to same value
-  repo.update_status(conn, job_id, types.Downloading(50), 1100)
+  repo.update_status(conn, job_id, core_types.Downloading(50), 1100)
   |> should.be_ok()
-  repo.update_status(conn, job_id, types.Downloading(50), 1101)
+  repo.update_status(conn, job_id, core_types.Downloading(50), 1101)
   |> should.be_ok()
 
   // Verify only one job exists

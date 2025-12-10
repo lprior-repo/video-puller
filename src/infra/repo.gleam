@@ -6,7 +6,11 @@ import cake/insert
 import cake/select
 import cake/update
 import cake/where
-import domain/types.{type JobId, type VideoJob, type VideoStatus}
+import domain/core_types
+import domain/types.{
+  type JobId, type VideoJob, type VideoStatus, job_id_to_string, new_job_id,
+  status_to_string,
+}
 import gleam/dynamic/decode
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -20,7 +24,7 @@ pub fn insert_job(
   url: String,
   created_at: Int,
 ) -> Result(Nil, DbError) {
-  let id_str = types.job_id_to_string(job_id)
+  let id_str = job_id_to_string(job_id)
 
   let query =
     insert.from_values(
@@ -87,8 +91,8 @@ pub fn update_status(
   status: VideoStatus,
   updated_at: Int,
 ) -> Result(Nil, DbError) {
-  let status_str = types.status_to_string(status)
-  let id_str = types.job_id_to_string(job_id)
+  let status_str = status_to_string(status)
+  let id_str = job_id_to_string(job_id)
 
   let base_update =
     update.new()
@@ -99,16 +103,16 @@ pub fn update_status(
 
   let query =
     case status {
-      types.Downloading(progress) ->
+      core_types.Downloading(progress) ->
         base_update
         |> update.set(update.set_int("progress", progress))
-      types.Completed ->
+      core_types.Completed ->
         base_update
         |> update.set(update.set_int("progress", 100))
-      types.Failed(reason) ->
+      core_types.Failed(reason) ->
         base_update
         |> update.set(update.set_string("error_message", reason))
-      types.Pending ->
+      core_types.Pending ->
         base_update
         |> update.set(update.set_int("progress", 0))
     }
@@ -125,7 +129,7 @@ pub fn update_path(
   path: String,
   updated_at: Int,
 ) -> Result(Nil, DbError) {
-  let id_str = types.job_id_to_string(job_id)
+  let id_str = job_id_to_string(job_id)
 
   let query =
     update.new()
@@ -148,7 +152,7 @@ pub fn update_metadata(
   duration_seconds: Option(Int),
   updated_at: Int,
 ) -> Result(Nil, DbError) {
-  let id_str = types.job_id_to_string(job_id)
+  let id_str = job_id_to_string(job_id)
 
   let base_update =
     update.new()
@@ -237,14 +241,14 @@ fn video_job_decoder() -> decode.Decoder(VideoJob) {
   use updated_at <- decode.then(decode.at([11], decode.int))
 
   let video_status = case status, progress {
-    "downloading", p -> types.Downloading(p)
-    "completed", _ -> types.Completed
-    "failed", _ -> types.Failed("Download failed")
-    _, _ -> types.Pending
+    "downloading", p -> core_types.Downloading(p)
+    "completed", _ -> core_types.Completed
+    "failed", _ -> core_types.Failed("Download failed")
+    _, _ -> core_types.Pending
   }
 
-  decode.success(types.VideoJob(
-    id: types.new_job_id(id),
+  decode.success(core_types.VideoJob(
+    id: new_job_id(id),
     url: url,
     status: video_status,
     path: path,

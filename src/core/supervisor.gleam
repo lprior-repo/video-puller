@@ -16,10 +16,10 @@
 /// - Scheduler handles all periodic tasks without stack growth
 /// - Proper fault isolation - one component failure doesn't crash others
 import core/manager
+import core/pool_types.{type PoolMessage}
 import core/retry
 import core/scheduler
 import core/startup
-import core/worker_pool
 import domain/types
 import engine/ytdlp
 import gleam/erlang/process.{type Subject}
@@ -51,7 +51,7 @@ pub type RuntimeRefs {
     scheduler: Option(Subject(scheduler.SchedulerMessage)),
     circuit_breaker: Option(Subject(retry.CircuitBreakerMessage)),
     retry_manager: Option(Subject(retry.RetryManagerMessage)),
-    worker_pool: Option(Subject(worker_pool.PoolMessage)),
+    worker_pool: Option(Subject(PoolMessage)),
     manager: Option(Subject(types.ManagerMessage)),
   )
 }

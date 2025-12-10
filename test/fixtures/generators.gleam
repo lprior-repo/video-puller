@@ -2,10 +2,11 @@
 ///
 /// F-005: Provides factory functions and random generators for domain types.
 /// Use these in tests to create consistent, reproducible test data.
-import domain/types.{
+import domain/core_types.{
   type DownloadCommand, type DownloadResult, type DownloaderConfig, type JobId,
-  type ManagerMessage, type VideoJob, type VideoStatus,
+  type VideoJob, type VideoStatus,
 }
+import domain/types.{type ManagerMessage}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -16,17 +17,17 @@ import gleam/option.{type Option, None, Some}
 
 /// Create a job ID with a specific string value
 pub fn job_id(value: String) -> JobId {
-  types.new_job_id(value)
+  core_types.new_job_id(value)
 }
 
 /// Create a job ID with a numeric suffix
 pub fn job_id_n(n: Int) -> JobId {
-  types.new_job_id("test-job-" <> int.to_string(n))
+  core_types.new_job_id("test-job-" <> int.to_string(n))
 }
 
 /// Create a unique job ID based on counter
 pub fn unique_job_id(prefix: String, counter: Int) -> JobId {
-  types.new_job_id(prefix <> "-" <> int.to_string(counter))
+  core_types.new_job_id(prefix <> "-" <> int.to_string(counter))
 }
 
 // ============================================================================
@@ -35,27 +36,27 @@ pub fn unique_job_id(prefix: String, counter: Int) -> JobId {
 
 /// Create a Pending status
 pub fn pending_status() -> VideoStatus {
-  types.Pending
+  core_types.Pending
 }
 
 /// Create a Downloading status with given progress
 pub fn downloading_status(progress: Int) -> VideoStatus {
-  types.Downloading(progress)
+  core_types.Downloading(progress)
 }
 
 /// Create a Completed status
 pub fn completed_status() -> VideoStatus {
-  types.Completed
+  core_types.Completed
 }
 
 /// Create a Failed status with given reason
 pub fn failed_status(reason: String) -> VideoStatus {
-  types.Failed(reason)
+  core_types.Failed(reason)
 }
 
 /// Create a Failed status with default error message
 pub fn failed_status_default() -> VideoStatus {
-  types.Failed("Download failed")
+  core_types.Failed("Download failed")
 }
 
 // ============================================================================
@@ -64,10 +65,10 @@ pub fn failed_status_default() -> VideoStatus {
 
 /// Create a minimal VideoJob with default values
 pub fn video_job(id: String, url: String) -> VideoJob {
-  types.VideoJob(
-    id: types.new_job_id(id),
+  core_types.VideoJob(
+    id: core_types.new_job_id(id),
     url: url,
-    status: types.Pending,
+    status: core_types.Pending,
     path: None,
     title: None,
     thumbnail_url: None,
@@ -87,8 +88,8 @@ pub fn video_job_full(
   created_at: Int,
   updated_at: Int,
 ) -> VideoJob {
-  types.VideoJob(
-    id: types.new_job_id(id),
+  core_types.VideoJob(
+    id: core_types.new_job_id(id),
     url: url,
     status: status,
     path: path,
@@ -108,10 +109,10 @@ pub fn pending_job(id: String, url: String) -> VideoJob {
 
 /// Create a downloading VideoJob with progress
 pub fn downloading_job(id: String, url: String, progress: Int) -> VideoJob {
-  types.VideoJob(
-    id: types.new_job_id(id),
+  core_types.VideoJob(
+    id: core_types.new_job_id(id),
     url: url,
-    status: types.Downloading(progress),
+    status: core_types.Downloading(progress),
     path: None,
     title: None,
     thumbnail_url: None,
@@ -124,10 +125,10 @@ pub fn downloading_job(id: String, url: String, progress: Int) -> VideoJob {
 
 /// Create a completed VideoJob
 pub fn completed_job(id: String, url: String, path: String) -> VideoJob {
-  types.VideoJob(
-    id: types.new_job_id(id),
+  core_types.VideoJob(
+    id: core_types.new_job_id(id),
     url: url,
-    status: types.Completed,
+    status: core_types.Completed,
     path: Some(path),
     title: None,
     thumbnail_url: None,
@@ -140,10 +141,10 @@ pub fn completed_job(id: String, url: String, path: String) -> VideoJob {
 
 /// Create a failed VideoJob
 pub fn failed_job(id: String, url: String, reason: String) -> VideoJob {
-  types.VideoJob(
-    id: types.new_job_id(id),
+  core_types.VideoJob(
+    id: core_types.new_job_id(id),
     url: url,
-    status: types.Failed(reason),
+    status: core_types.Failed(reason),
     path: None,
     title: None,
     thumbnail_url: None,
@@ -160,17 +161,17 @@ pub fn failed_job(id: String, url: String, reason: String) -> VideoJob {
 
 /// Create a StartDownload command
 pub fn start_download_cmd(job_id: JobId, url: String) -> DownloadCommand {
-  types.StartDownload(job_id, url)
+  core_types.StartDownload(job_id, url)
 }
 
 /// Create a CancelDownload command
 pub fn cancel_download_cmd(job_id: JobId) -> DownloadCommand {
-  types.CancelDownload(job_id)
+  core_types.CancelDownload(job_id)
 }
 
 /// Create a GetProgress command
 pub fn get_progress_cmd(job_id: JobId) -> DownloadCommand {
-  types.GetProgress(job_id)
+  core_types.GetProgress(job_id)
 }
 
 // ============================================================================
@@ -179,22 +180,22 @@ pub fn get_progress_cmd(job_id: JobId) -> DownloadCommand {
 
 /// Create a DownloadStarted result
 pub fn download_started(job_id: JobId) -> DownloadResult {
-  types.DownloadStarted(job_id)
+  core_types.DownloadStarted(job_id)
 }
 
 /// Create a DownloadProgress result
 pub fn download_progress(job_id: JobId, progress: Int) -> DownloadResult {
-  types.DownloadProgress(job_id, progress)
+  core_types.DownloadProgress(job_id, progress)
 }
 
 /// Create a DownloadComplete result
 pub fn download_complete(job_id: JobId, path: String) -> DownloadResult {
-  types.DownloadComplete(job_id, path)
+  core_types.DownloadComplete(job_id, path)
 }
 
 /// Create a DownloadFailed result
 pub fn download_failed(job_id: JobId, reason: String) -> DownloadResult {
-  types.DownloadFailed(job_id, reason)
+  core_types.DownloadFailed(job_id, reason)
 }
 
 // ============================================================================
@@ -222,7 +223,7 @@ pub fn shutdown_msg() -> ManagerMessage {
 
 /// Create a default DownloaderConfig
 pub fn default_config() -> DownloaderConfig {
-  types.DownloaderConfig(
+  core_types.DownloaderConfig(
     max_concurrency: 3,
     poll_interval_ms: 1000,
     output_directory: "/tmp/downloads",
@@ -235,7 +236,11 @@ pub fn downloader_config(
   poll_interval_ms: Int,
   output_directory: String,
 ) -> DownloaderConfig {
-  types.DownloaderConfig(max_concurrency, poll_interval_ms, output_directory)
+  core_types.DownloaderConfig(
+    max_concurrency,
+    poll_interval_ms,
+    output_directory,
+  )
 }
 
 // ============================================================================
