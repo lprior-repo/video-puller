@@ -633,6 +633,7 @@ fn glean_it_form() -> Element(a) {
       span([class("glean-word")], [text("GLEAN:")]),
       text(" ZERO-FRICTION VIDEO DELIVERY"),
     ]),
+    // Single URL form
     form(
       [
         attribute("action", "/jobs"),
@@ -656,6 +657,60 @@ fn glean_it_form() -> Element(a) {
         ),
       ],
     ),
+    // Batch URL form
+    batch_url_form(),
+  ])
+}
+
+/// Batch URL upload form - one URL per line
+fn batch_url_form() -> Element(a) {
+  details([class("advanced-options"), attribute("style", "margin-top: 25px;")], [
+    summary([], [text("Batch Download (Multiple URLs)")]),
+    div([class("advanced-options-content")], [
+      form(
+        [
+          attribute("action", "/jobs/batch"),
+          attribute("method", "POST"),
+        ],
+        [
+          html.textarea(
+            [
+              name("urls"),
+              class("url-input"),
+              attribute("rows", "8"),
+              attribute("required", ""),
+              placeholder(
+                "Paste multiple URLs here, one per line:\nhttps://youtube.com/watch?v=abc123\nhttps://youtube.com/watch?v=xyz789\n...",
+              ),
+              attribute(
+                "style",
+                "width: 100%; resize: vertical; font-family: monospace;",
+              ),
+            ],
+            "",
+          ),
+          p(
+            [
+              class("text-sm text-gray-400"),
+              attribute("style", "margin-top: 10px;"),
+            ],
+            [
+              text(
+                "Each line should contain one video URL. Empty lines will be skipped.",
+              ),
+            ],
+          ),
+          button(
+            [
+              type_("submit"),
+              class("cta-button"),
+              attribute("style", "margin-top: 15px;"),
+            ],
+            [text("DOWNLOAD ALL")],
+          ),
+        ],
+      ),
+    ]),
   ])
 }
 

@@ -31,6 +31,7 @@ fn route(req: Request, ctx: Context) -> Response {
 
     // Job management
     http.Post, ["jobs"] -> handlers.create_job(req, ctx)
+    http.Post, ["jobs", "batch"] -> handlers.create_batch_jobs(req, ctx)
     http.Get, ["jobs", id] -> handlers.get_job(req, ctx, id)
 
     // About page

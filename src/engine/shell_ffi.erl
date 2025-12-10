@@ -1,6 +1,6 @@
 -module(shell_ffi).
 
--export([open_streaming_port/2, read_line/1, close_port/1, is_port_alive/1]).
+-export([open_streaming_port/2, read_line/1, read_line_timeout/2, close_port/1, is_port_alive/1]).
 
 %% Open a port for streaming command output
 %% Returns {ok, Port} or {error, Reason}
@@ -66,27 +66,30 @@ build_env_with_node_path() ->
     NewPath = string:join([CurrentPath | ValidNodePaths], ":"),
     [{"PATH", NewPath}].
 
-%% Read a line from the port with timeout
-%% Returns Gleam StreamLine type:
+%% Read a line from the port (no timeout version for stream_loop)
+%% Returns Gleam StreamLine type directly (not wrapped in Result):
 %% {output_line, Binary} | end_of_stream | {process_exit, Int} | {stream_error, Binary}
 read_line(Port) ->
     %% 5 minutes timeout - yt-dlp can be slow (metadata fetch, rate limiting, etc.)
-    read_line_timeout(Port, 300000).
+    case read_line_timeout(Port, 300000) of
+        {ok, Result} -> Result;
+        {error, timeout} -> {stream_error, <<"timeout">>}
+    end.
 
 read_line_timeout(Port, Timeout) ->
     receive
         {Port, {data, {eol, Bytes}}} ->
-            {output_line, list_to_binary(Bytes)};
+            {ok, {output_line, list_to_binary(Bytes)}};
         {Port, {data, {noeol, Bytes}}} ->
-            {output_line, list_to_binary(Bytes)};
+            {ok, {output_line, list_to_binary(Bytes)}};
         {Port, eof} ->
-            end_of_stream;
+            {ok, end_of_stream};
         {Port, {exit_status, Code}} ->
-            {process_exit, Code};
+            {ok, {process_exit, Code}};
         {'EXIT', Port, Reason} ->
-            {stream_error, list_to_binary(io_lib:format("~p", [Reason]))}
+            {ok, {stream_error, list_to_binary(io_lib:format("~p", [Reason]))}}
     after Timeout ->
-        {stream_error, <<"timeout">>}
+        {error, timeout}
     end.
 
 %% Close the port gracefully

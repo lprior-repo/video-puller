@@ -150,16 +150,22 @@ fn handle_message(
         True -> {
           let updated_active = dict.delete(state.active_downloads, job_id_str)
           let updated_stats = case status {
-            core_types.Completed ->
+            core_types.Completed -> {
+              // Log job completion
+              log_job_completion(job_id)
               core_types.ManagerStats(
                 ..state.stats,
                 total_completed: state.stats.total_completed + 1,
               )
-            core_types.Failed(_) ->
+            }
+            core_types.Failed(reason) -> {
+              // Log job failure
+              log_job_failure(job_id, reason)
               core_types.ManagerStats(
                 ..state.stats,
                 total_failed: state.stats.total_failed + 1,
               )
+            }
             _ -> state.stats
           }
           #(updated_active, updated_stats)
@@ -312,12 +318,8 @@ fn poll_and_dispatch(state: ManagerState) -> ManagerState {
                     // Submit to worker pool
                     process.send(pool, pool_types.SubmitJob(job.id, job.url))
 
-                    io.println(
-                      "📤 Submitted to pool: "
-                      <> types.job_id_to_string(job.id)
-                      <> " - "
-                      <> job.url,
-                    )
+                    // Log job dispatch
+                    log_job_dispatch(job.id, job.url)
 
                     // Track as active
                     let job_id_str = types.job_id_to_string(job.id)
@@ -504,3 +506,43 @@ fn make_download_message(
   reply: Subject(types.DownloadResult),
   progress: Subject(ManagerMessage),
 ) -> DownloaderMsg
+
+// Structured logging functions
+fn log_job_dispatch(job_id: JobId, url: String) -> Nil {
+  let timestamp = format_timestamp(get_timestamp())
+  io.println(
+    "["
+    <> timestamp
+    <> "] [MANAGER] JOB_DISPATCH job_id="
+    <> types.job_id_to_string(job_id)
+    <> " url="
+    <> url,
+  )
+}
+
+fn log_job_completion(job_id: JobId) -> Nil {
+  let timestamp = format_timestamp(get_timestamp())
+  io.println(
+    "["
+    <> timestamp
+    <> "] [MANAGER] JOB_COMPLETE job_id="
+    <> types.job_id_to_string(job_id),
+  )
+}
+
+fn log_job_failure(job_id: JobId, reason: String) -> Nil {
+  let timestamp = format_timestamp(get_timestamp())
+  io.println(
+    "["
+    <> timestamp
+    <> "] [MANAGER] JOB_FAILED job_id="
+    <> types.job_id_to_string(job_id)
+    <> " reason="
+    <> reason,
+  )
+}
+
+fn format_timestamp(ts: Int) -> String {
+  // Simple string representation - avoid calendar functions that crash with nanoseconds
+  int.to_string(ts)
+}

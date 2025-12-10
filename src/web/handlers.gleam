@@ -138,6 +138,92 @@ pub fn get_job(_req: Request, _ctx: Context, _id: String) -> Response {
   redirect(to: "/")
 }
 
+/// Create multiple jobs from batch URL submission (one URL per line)
+pub fn create_batch_jobs(req: Request, ctx: Context) -> Response {
+  use form_data <- wisp.require_form(req)
+
+  // Extract URLs from form data (textarea content)
+  let urls_text =
+    form_data.values
+    |> list.find(fn(pair) { pair.0 == "urls" })
+    |> result.map(fn(pair) { pair.1 })
+
+  case urls_text {
+    Ok(text) -> {
+      // Split by newlines and filter empty lines
+      let urls =
+        text
+        |> string.split("\n")
+        |> list.map(string.trim)
+        |> list.filter(fn(line) { !string.is_empty(line) })
+
+      case list.is_empty(urls) {
+        True -> {
+          templates.layout(
+            "No URLs",
+            templates.error_page(400, "No valid URLs provided"),
+          )
+          |> html_response(400, _)
+        }
+        False -> {
+          // Process each URL
+          let results =
+            list.map(urls, fn(url) {
+              case validate_video_url(url) {
+                Ok(validated_url) -> {
+                  let job_id = generate_job_id()
+                  let timestamp = get_timestamp()
+                  case
+                    repo.insert_job(ctx.db, job_id, validated_url, timestamp)
+                  {
+                    Ok(_) -> {
+                      io.println(
+                        "Created job: " <> types.job_id_to_string(job_id),
+                      )
+                      Ok(validated_url)
+                    }
+                    Error(_) -> Error("Failed to create job for: " <> url)
+                  }
+                }
+                Error(reason) ->
+                  Error("Invalid URL (" <> reason <> "): " <> url)
+              }
+            })
+
+          // Count successes and failures
+          let successes =
+            list.filter(results, fn(r) {
+              case r {
+                Ok(_) -> True
+                Error(_) -> False
+              }
+            })
+          let success_count = list.length(successes)
+          let total_count = list.length(urls)
+
+          io.println(
+            "Batch created: "
+            <> int.to_string(success_count)
+            <> "/"
+            <> int.to_string(total_count)
+            <> " jobs",
+          )
+
+          // Redirect to queue page to show the new jobs
+          redirect(to: "/queue")
+        }
+      }
+    }
+    Error(_) -> {
+      templates.layout(
+        "Missing URLs",
+        templates.error_page(400, "URLs are required"),
+      )
+      |> html_response(400, _)
+    }
+  }
+}
+
 /// Queue page handler - shows pending jobs only
 pub fn queue(_req: Request, ctx: Context) -> Response {
   case repo.list_jobs(ctx.db, option.Some("pending")) {
