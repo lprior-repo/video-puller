@@ -31,13 +31,14 @@ fn create_migrations_table(conn: Db) -> Result(Nil, DbError) {
 
 /// Load all SQL migration files from priv/migrations
 fn load_migration_files() -> Result(List(#(String, String)), DbError) {
-  case simplifile.read_directory("priv/migrations") {
+  let migrations_dir = get_migrations_path()
+  case simplifile.read_directory(migrations_dir) {
     Ok(files) -> {
       files
       |> list.filter(string.ends_with(_, ".sql"))
       |> list.sort(string.compare)
       |> list.try_map(fn(filename) {
-        case simplifile.read("priv/migrations/" <> filename) {
+        case simplifile.read(migrations_dir <> "/" <> filename) {
           Ok(content) -> Ok(#(filename, content))
           Error(_) ->
             Error(db.MigrationError(
@@ -116,3 +117,18 @@ fn record_migration(conn: Db, filename: String) -> Result(Nil, DbError) {
 /// Get current Unix timestamp
 @external(erlang, "os", "system_time")
 fn get_timestamp() -> Int
+
+/// Get the path to the migrations directory
+/// In development, uses priv/migrations
+/// In release, uses the Erlang application priv directory
+@external(erlang, "video_puller_ffi", "priv_directory")
+fn get_priv_directory(app: String) -> String
+
+fn get_migrations_path() -> String {
+  // Try to use Erlang's code:priv_dir first (for releases)
+  // Fall back to local priv/migrations for development
+  case get_priv_directory("video_puller") {
+    "" -> "priv/migrations"
+    priv_dir -> priv_dir <> "/migrations"
+  }
+}

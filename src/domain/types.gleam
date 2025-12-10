@@ -2,11 +2,28 @@
 ///
 /// This module defines the core types used throughout the application,
 /// following the schemas defined in the system specification.
+import gleam/erlang/process.{type Subject}
 import gleam/option.{type Option}
 
 /// JobId - Unique identifier for a download job
 pub type JobId {
   JobId(value: String)
+}
+
+/// Format option returned by yt-dlp -F command
+pub type FormatOption {
+  FormatOption(code: String, ext: String, resolution: String, note: String)
+}
+
+/// Video metadata extracted from yt-dlp --dump-json
+pub type VideoMetadata {
+  VideoMetadata(
+    title: String,
+    thumbnail: String,
+    duration: Int,
+    uploader: String,
+    view_count: Option(Int),
+  )
 }
 
 /// Video download status state machine
@@ -26,6 +43,10 @@ pub type VideoJob {
     url: String,
     status: VideoStatus,
     path: Option(String),
+    title: Option(String),
+    thumbnail_url: Option(String),
+    duration_seconds: Option(Int),
+    format_code: Option(String),
     created_at: Int,
     updated_at: Int,
   )
@@ -50,7 +71,9 @@ pub type DownloadResult {
 pub type ManagerMessage {
   PollJobs
   JobStatusUpdate(job_id: JobId, status: VideoStatus)
+  UpdateProgress(job_id: JobId, progress: Int)
   Shutdown
+  SetSelf(Subject(ManagerMessage))
 }
 
 /// Configuration for the video downloader

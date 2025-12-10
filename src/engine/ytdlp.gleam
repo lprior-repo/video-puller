@@ -3,14 +3,30 @@
 /// Constructs safe yt-dlp commands with proper argument escaping.
 /// CRITICAL: All URL inputs must be validated (INV-001).
 import domain/types.{type JobId}
+import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
 import gleam/uri
 
+/// Audio format options for audio-only downloads
+pub type AudioFormat {
+  MP3
+  AAC
+  OPUS
+  BestAudio
+}
+
 /// Configuration for yt-dlp downloads
 pub type DownloadConfig {
-  DownloadConfig(output_directory: String, format: String, max_filesize: String)
+  DownloadConfig(
+    output_directory: String,
+    format: String,
+    max_filesize: String,
+    audio_only: Bool,
+    audio_format: AudioFormat,
+    allow_playlist: Bool,
+  )
 }
 
 /// Build yt-dlp command arguments for downloading a video
@@ -18,6 +34,7 @@ pub fn build_download_args(
   url: String,
   job_id: JobId,
   config: DownloadConfig,
+  format_code: option.Option(String),
 ) -> Result(List(String), String) {
   // Validate URL to prevent injection
   use _ <- result.try(validate_url(url))
@@ -25,29 +42,66 @@ pub fn build_download_args(
   let id_str = types.job_id_to_string(job_id)
   let output_template = config.output_directory <> "/" <> id_str <> ".%(ext)s"
 
-  Ok([
+  // Build base args
+  let base_args = [
     // Output template
     "--output",
     output_template,
-    // Format selection (best quality)
-    "--format",
-    config.format,
     // Max filesize limit
     "--max-filesize",
     config.max_filesize,
     // Progress output
     "--newline",
     "--progress",
-    // No playlist (single video only)
-    "--no-playlist",
     // Retry and timeout settings
     "--retries",
     "3",
     "--socket-timeout",
     "30",
-    // The URL (last argument)
-    url,
-  ])
+  ]
+
+  // Add format args based on audio_only mode
+  let format_args = case config.audio_only {
+    True -> build_audio_args(config.audio_format)
+    False -> {
+      // Use provided format_code or fall back to config.format
+      let format = case format_code {
+        Some(code) -> code
+        None -> config.format
+      }
+      ["--format", format]
+    }
+  }
+
+  // Add playlist handling
+  let playlist_args = case config.allow_playlist {
+    True -> ["--yes-playlist"]
+    False -> ["--no-playlist"]
+  }
+
+  // Combine all args and add URL last
+  Ok(list.flatten([base_args, format_args, playlist_args, [url]]))
+}
+
+/// Build audio extraction arguments
+fn build_audio_args(audio_format: AudioFormat) -> List(String) {
+  let format_str = case audio_format {
+    MP3 -> "mp3"
+    AAC -> "aac"
+    OPUS -> "opus"
+    BestAudio -> "best"
+  }
+
+  case audio_format {
+    BestAudio -> ["--format", "bestaudio", "--extract-audio"]
+    _ -> [
+      "--format",
+      "bestaudio",
+      "--extract-audio",
+      "--audio-format",
+      format_str,
+    ]
+  }
 }
 
 /// Build yt-dlp command to get video info without downloading
@@ -57,6 +111,16 @@ pub fn build_info_args(url: String) -> Result(List(String), String) {
   Ok([
     "--dump-json",
     "--no-playlist",
+    url,
+  ])
+}
+
+/// Build yt-dlp command to list available formats for a video
+pub fn build_list_formats_args(url: String) -> Result(List(String), String) {
+  use _ <- result.try(validate_url(url))
+
+  Ok([
+    "-F",
     url,
   ])
 }
@@ -92,5 +156,52 @@ pub fn default_config() -> DownloadConfig {
     output_directory: "./downloads",
     format: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
     max_filesize: "2G",
+    audio_only: False,
+    audio_format: BestAudio,
+    allow_playlist: False,
   )
+}
+
+/// Create audio-only download configuration
+pub fn audio_config(format: AudioFormat) -> DownloadConfig {
+  DownloadConfig(
+    output_directory: "./downloads",
+    format: "bestaudio",
+    max_filesize: "500M",
+    audio_only: True,
+    audio_format: format,
+    allow_playlist: False,
+  )
+}
+
+/// Build yt-dlp command to get playlist info without downloading
+pub fn build_playlist_info_args(url: String) -> Result(List(String), String) {
+  use _ <- result.try(validate_url(url))
+
+  Ok([
+    "--dump-json",
+    "--flat-playlist",
+    "--yes-playlist",
+    url,
+  ])
+}
+
+/// Convert AudioFormat to string
+pub fn audio_format_to_string(format: AudioFormat) -> String {
+  case format {
+    MP3 -> "mp3"
+    AAC -> "aac"
+    OPUS -> "opus"
+    BestAudio -> "best"
+  }
+}
+
+/// Parse string to AudioFormat
+pub fn string_to_audio_format(s: String) -> AudioFormat {
+  case string.lowercase(s) {
+    "mp3" -> MP3
+    "aac" -> AAC
+    "opus" -> OPUS
+    _ -> BestAudio
+  }
 }

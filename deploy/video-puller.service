@@ -1,0 +1,50 @@
+[Unit]
+Description=FractalVideoEater - Video Download System
+Documentation=https://github.com/yourusername/video-puller
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=video-puller
+Group=video-puller
+
+# Working directory - where the application is installed
+WorkingDirectory=/opt/video-puller
+
+# Environment variables
+Environment="PORT=8080"
+Environment="DB_PATH=/var/lib/video-puller/video_eater.db"
+Environment="STATIC_DIR=/opt/video-puller/priv/static"
+# Optionally set a fixed SECRET_KEY for session persistence across restarts
+# Environment="SECRET_KEY=your-secret-key-here"
+
+# Command to run - using optimized Erlang release
+ExecStart=/opt/video-puller/build/erlang-shipment/entrypoint.sh run
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Resource limits
+LimitNOFILE=65536
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/video-puller
+
+# Process management
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=video-puller
+
+[Install]
+WantedBy=multi-user.target

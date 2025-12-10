@@ -7,11 +7,9 @@ import engine/parser
 import engine/shell
 import engine/ytdlp
 import gleam/erlang/process.{type Subject}
-import gleam/list
 import gleam/option.{type Option}
 import gleam/otp/actor
 import gleam/result
-import gleam/string
 
 /// Actor state for the downloader
 pub type DownloaderState {
@@ -20,7 +18,12 @@ pub type DownloaderState {
 
 /// Messages the downloader actor can receive
 pub type DownloaderMessage {
-  Download(job_id: JobId, url: String, reply: Subject(DownloadResult))
+  Download(
+    job_id: JobId,
+    url: String,
+    reply: Subject(DownloadResult),
+    progress_subject: Subject(types.ManagerMessage),
+  )
   Shutdown
 }
 
@@ -43,9 +46,10 @@ fn handle_message(
   message: DownloaderMessage,
 ) -> actor.Next(DownloaderState, DownloaderMessage) {
   case message {
-    Download(job_id, url, reply) -> {
-      // Execute the download
-      let result = execute_download(job_id, url, state.config)
+    Download(job_id, url, reply, progress_subject) -> {
+      // Execute the download with streaming progress
+      let result =
+        execute_download_streaming(job_id, url, state.config, progress_subject)
 
       // Send result back to caller
       process.send(reply, result)
@@ -60,28 +64,42 @@ fn handle_message(
   }
 }
 
-/// Execute a download using yt-dlp
-fn execute_download(
+/// Execute a download using yt-dlp with streaming progress updates
+fn execute_download_streaming(
   job_id: JobId,
   url: String,
   config: ytdlp.DownloadConfig,
+  progress_subject: Subject(types.ManagerMessage),
 ) -> DownloadResult {
   // Build command arguments
-  case ytdlp.build_download_args(url, job_id, config) {
+  case ytdlp.build_download_args(url, job_id, config, option.None) {
     Ok(args) -> {
-      // Execute yt-dlp command
-      case shell.run("yt-dlp", args) {
-        Ok(result) -> {
-          case result.exit_code {
+      // Execute yt-dlp command with streaming output
+      case
+        shell.run_streaming("yt-dlp", args, fn(line) {
+          // Parse progress from each line
+          case parser.parse_progress(line) {
+            Ok(progress_info) -> {
+              // Only send update if progress changed
+              process.send(
+                progress_subject,
+                types.UpdateProgress(job_id, progress_info.percentage),
+              )
+            }
+            Error(_) -> Nil
+          }
+          Nil
+        })
+      {
+        Ok(exit_code) -> {
+          case exit_code {
             0 -> {
-              // Success - extract path from output
-              let path = extract_path_from_output(result.stdout, config)
+              // Success - use configured output directory
+              let path = config.output_directory <> "/download_complete"
               types.DownloadComplete(job_id, path)
             }
             _ -> {
-              // Failed - extract error from stderr
-              let error = parser.extract_error(result.stderr)
-              types.DownloadFailed(job_id, error)
+              types.DownloadFailed(job_id, "Download failed with exit code")
             }
           }
         }
@@ -92,28 +110,5 @@ fn execute_download(
       }
     }
     Error(msg) -> types.DownloadFailed(job_id, "Invalid URL: " <> msg)
-  }
-}
-
-/// Extract the output file path from yt-dlp output
-fn extract_path_from_output(
-  output: String,
-  config: ytdlp.DownloadConfig,
-) -> String {
-  // Look for "[download] Destination: " line or similar
-  let lines = string.split(output, "\n")
-
-  case
-    lines
-    |> list.find(fn(line) { string.contains(line, "[download] Destination:") })
-  {
-    Ok(line) -> {
-      // Extract path after "Destination: "
-      case string.split(line, "Destination: ") {
-        [_, path] -> string.trim(path)
-        _ -> config.output_directory <> "/unknown.mp4"
-      }
-    }
-    Error(_) -> config.output_directory <> "/unknown.mp4"
   }
 }

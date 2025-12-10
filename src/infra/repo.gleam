@@ -19,8 +19,8 @@ pub fn insert_job(
 ) -> Result(Nil, DbError) {
   let sql =
     "
-    INSERT INTO video_jobs (id, url, status, progress, path, error_message, created_at, updated_at)
-    VALUES (?, ?, 'pending', 0, NULL, NULL, ?, ?)
+    INSERT INTO video_jobs (id, url, status, progress, path, error_message, title, thumbnail_url, duration_seconds, format_code, created_at, updated_at)
+    VALUES (?, ?, 'pending', 0, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
   "
 
   let id_str = types.job_id_to_string(job_id)
@@ -46,10 +46,10 @@ pub fn list_jobs(
 ) -> Result(List(VideoJob), DbError) {
   let sql = case status_filter {
     None ->
-      "SELECT id, url, status, progress, path, error_message, created_at, updated_at
+      "SELECT id, url, status, progress, path, error_message, title, thumbnail_url, duration_seconds, format_code, created_at, updated_at
        FROM video_jobs ORDER BY created_at DESC"
     Some(_) ->
-      "SELECT id, url, status, progress, path, error_message, created_at, updated_at
+      "SELECT id, url, status, progress, path, error_message, title, thumbnail_url, duration_seconds, format_code, created_at, updated_at
        FROM video_jobs WHERE status = ? ORDER BY created_at DESC"
   }
 
@@ -123,22 +123,76 @@ pub fn update_path(
   |> result.replace(Nil)
 }
 
+/// Update job metadata (title, thumbnail, duration)
+pub fn update_metadata(
+  conn: Db,
+  job_id: JobId,
+  title: Option(String),
+  thumbnail_url: Option(String),
+  duration_seconds: Option(Int),
+  updated_at: Int,
+) -> Result(Nil, DbError) {
+  let sql =
+    "UPDATE video_jobs SET title = ?, thumbnail_url = ?, duration_seconds = ?, updated_at = ? WHERE id = ?"
+  let id_str = types.job_id_to_string(job_id)
+
+  let title_value = case title {
+    Some(t) -> sqlight.text(t)
+    None -> sqlight.null()
+  }
+  let thumbnail_value = case thumbnail_url {
+    Some(u) -> sqlight.text(u)
+    None -> sqlight.null()
+  }
+  let duration_value = case duration_seconds {
+    Some(d) -> sqlight.int(d)
+    None -> sqlight.null()
+  }
+
+  db.query(
+    conn,
+    sql,
+    [
+      title_value,
+      thumbnail_value,
+      duration_value,
+      sqlight.int(updated_at),
+      sqlight.text(id_str),
+    ],
+    decode.at([0], decode.int),
+  )
+  |> result.replace(Nil)
+}
+
 /// Reset zombie jobs (jobs stuck in 'downloading' state) back to 'pending'
 /// This is run on application startup to recover from crashes
 pub fn reset_zombies(conn: Db, updated_at: Int) -> Result(Int, DbError) {
-  let sql =
+  // First count how many zombies we have
+  let count_sql = "SELECT COUNT(*) FROM video_jobs WHERE status = 'downloading'"
+  use count_rows <- result.try(db.query(
+    conn,
+    count_sql,
+    [],
+    decode.at([0], decode.int),
+  ))
+  let zombie_count = case list.first(count_rows) {
+    Ok(n) -> n
+    Error(_) -> 0
+  }
+
+  // Then update them (using query to support parameters, ignore empty result)
+  let update_sql =
     "UPDATE video_jobs SET status = 'pending', progress = 0, updated_at = ?
      WHERE status = 'downloading'"
 
-  use rows <- result.try(db.query(
+  use _ <- result.try(db.query(
     conn,
-    sql,
+    update_sql,
     [sqlight.int(updated_at)],
     decode.at([0], decode.int),
   ))
 
-  // Return count of reset jobs
-  Ok(list.length(rows))
+  Ok(zombie_count)
 }
 
 /// Decoder for VideoJob from database row
@@ -149,8 +203,18 @@ fn video_job_decoder() -> decode.Decoder(VideoJob) {
   use progress <- decode.then(decode.at([3], decode.int))
   use path <- decode.then(decode.at([4], decode.optional(decode.string)))
   use _error <- decode.then(decode.at([5], decode.optional(decode.string)))
-  use created_at <- decode.then(decode.at([6], decode.int))
-  use updated_at <- decode.then(decode.at([7], decode.int))
+  use title <- decode.then(decode.at([6], decode.optional(decode.string)))
+  use thumbnail_url <- decode.then(decode.at(
+    [7],
+    decode.optional(decode.string),
+  ))
+  use duration_seconds <- decode.then(decode.at(
+    [8],
+    decode.optional(decode.int),
+  ))
+  use format_code <- decode.then(decode.at([9], decode.optional(decode.string)))
+  use created_at <- decode.then(decode.at([10], decode.int))
+  use updated_at <- decode.then(decode.at([11], decode.int))
 
   let video_status = case status, progress {
     "downloading", p -> types.Downloading(p)
@@ -164,6 +228,10 @@ fn video_job_decoder() -> decode.Decoder(VideoJob) {
     url: url,
     status: video_status,
     path: path,
+    title: title,
+    thumbnail_url: thumbnail_url,
+    duration_seconds: duration_seconds,
+    format_code: format_code,
     created_at: created_at,
     updated_at: updated_at,
   ))

@@ -1,9 +1,10 @@
-import core/supervisor
+import core/startup
 import gleam/erlang/process
 import gleam/io
 import gleam/list
 import gleam/result
 import gleam/string
+import web/server
 
 /// Main entry point for the application
 pub fn main() -> Nil {
@@ -11,21 +12,30 @@ pub fn main() -> Nil {
   io.println("============================================")
   io.println("")
 
-  // Start the root supervisor tree
-  case supervisor.start() {
-    Ok(started) -> {
-      io.println("")
-      io.println("✅ Application started successfully!")
-      io.println("PID: " <> string.inspect(started.pid))
-      io.println("")
-      io.println("Press Ctrl+C to stop")
+  // Initialize database and run startup sequence
+  case startup.initialize() {
+    Ok(db) -> {
+      // Start the web server
+      case server.start(db) {
+        Ok(_) -> {
+          io.println("")
+          io.println("✅ Application started successfully!")
+          io.println("")
+          io.println("Press Ctrl+C to stop")
 
-      // Keep the main process alive
-      process.sleep_forever()
+          // Keep the main process alive
+          process.sleep_forever()
+        }
+        Error(err) -> {
+          io.println("")
+          io.println("❌ Failed to start web server")
+          io.println("Error: " <> err)
+        }
+      }
     }
     Error(err) -> {
       io.println("")
-      io.println("❌ Failed to start application")
+      io.println("❌ Failed to initialize application")
       io.println("Error: " <> string.inspect(err))
     }
   }

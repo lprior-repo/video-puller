@@ -9,9 +9,16 @@ default:
 deps:
     gleam deps download
 
-# Build the project
+# Build the project (development)
 build:
     gleam build
+
+# Build optimized release with Erlang shipment
+release:
+    gleam export erlang-shipment
+    @echo "✓ Release build complete!"
+    @echo "  Location: build/erlang-shipment/"
+    @echo "  Run with: ./build/erlang-shipment/entrypoint.sh run"
 
 # Run the project
 run:

@@ -1,5 +1,5 @@
 import domain/types
-import gleam/option.{None, Some}
+import gleam/option.{None}
 import gleeunit
 import gleeunit/should
 
@@ -66,6 +66,10 @@ pub fn video_job_test() {
       url: "https://example.com/video",
       status: types.Pending,
       path: None,
+      title: None,
+      thumbnail_url: None,
+      duration_seconds: None,
+      format_code: None,
       created_at: 1000,
       updated_at: 1000,
     )

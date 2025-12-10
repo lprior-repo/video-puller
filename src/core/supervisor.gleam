@@ -113,12 +113,31 @@ fn load_config() -> ytdlp.DownloadConfig {
       "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
     )
   let max_filesize = get_env_string("MAX_FILESIZE", "2G")
+  let audio_only = get_env_bool("AUDIO_ONLY", False)
+  let audio_format =
+    ytdlp.string_to_audio_format(get_env_string("AUDIO_FORMAT", "best"))
+  let allow_playlist = get_env_bool("ALLOW_PLAYLIST", False)
 
   ytdlp.DownloadConfig(
     output_directory: output_dir,
     format: format,
     max_filesize: max_filesize,
+    audio_only: audio_only,
+    audio_format: audio_format,
+    allow_playlist: allow_playlist,
   )
+}
+
+/// Get boolean from environment with default fallback
+fn get_env_bool(key: String, default: Bool) -> Bool {
+  case system_env_get(key) {
+    Ok(value) ->
+      case value {
+        "true" | "1" | "yes" -> True
+        _ -> False
+      }
+    Error(_) -> default
+  }
 }
 
 /// Get string from environment with default fallback
