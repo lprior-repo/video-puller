@@ -58,6 +58,18 @@ pub fn start(
   poll_interval_ms: Int,
   max_concurrency: Int,
 ) -> Result(Subject(ManagerMessage), actor.StartError) {
+  start_with_workers(db, config, poll_interval_ms, max_concurrency, 20, 500)
+}
+
+/// Start the manager actor with custom worker pool settings
+pub fn start_with_workers(
+  db: Db,
+  config: ytdlp.DownloadConfig,
+  poll_interval_ms: Int,
+  max_concurrency: Int,
+  min_workers: Int,
+  max_workers: Int,
+) -> Result(Subject(ManagerMessage), actor.StartError) {
   let state =
     ManagerState(
       db: db,
@@ -87,10 +99,7 @@ pub fn start(
     // Set self reference
     process.send(subject, SetSelf(subject))
 
-    // Initialize worker pool with higher capacity for BEAM
-    let min_workers = int.max(5, max_concurrency / 2)
-    let max_workers = int.max(50, max_concurrency * 5)
-
+    // Initialize worker pool with configured capacity
     case worker_pool.start(config, subject, min_workers, max_workers) {
       Ok(pool) -> {
         io.println(
@@ -289,6 +298,14 @@ fn poll_and_dispatch(state: ManagerState) -> ManagerState {
   case state.is_shutting_down {
     True -> state
     False -> {
+      // Reload config from database for dynamic settings support
+      // This allows settings changed in the UI to take effect on next poll
+      let fresh_config = case repo.get_download_config(state.db) {
+        Ok(config) -> config
+        Error(_) -> state.config
+      }
+      let state = ManagerState(..state, config: fresh_config)
+
       // Check if we can accept more jobs
       let active_count = dict.size(state.active_downloads)
       let available_slots = state.max_concurrency - active_count
@@ -488,8 +505,16 @@ fn result_to_status(result: types.DownloadResult) -> types.VideoStatus {
 }
 
 // External FFI declarations
-@external(erlang, "os", "system_time")
-fn get_timestamp() -> Int
+type TimeUnit {
+  Second
+}
+
+@external(erlang, "erlang", "system_time")
+fn get_system_time_seconds(unit: TimeUnit) -> Int
+
+fn get_timestamp() -> Int {
+  get_system_time_seconds(Second)
+}
 
 // Downloader FFI (to avoid circular imports)
 @external(erlang, "engine@downloader", "start")

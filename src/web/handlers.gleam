@@ -7,6 +7,7 @@ import domain/core_types.{Completed, Failed}
 import domain/subscription_types.{type SubscriptionStatus}
 import domain/types
 import engine/shell
+import engine/ytdlp
 import gleam/erlang/process
 import gleam/http/request
 import gleam/int
@@ -166,51 +167,59 @@ pub fn create_batch_jobs(req: Request, ctx: Context) -> Response {
           |> html_response(400, _)
         }
         False -> {
-          // Process each URL
-          let results =
-            list.map(urls, fn(url) {
+          // Validate all URLs first
+          let validated =
+            list.filter_map(urls, fn(url) {
               case validate_video_url(url) {
-                Ok(validated_url) -> {
-                  let job_id = generate_job_id()
-                  let timestamp = get_timestamp()
-                  case
-                    repo.insert_job(ctx.db, job_id, validated_url, timestamp)
-                  {
-                    Ok(_) -> {
-                      io.println(
-                        "Created job: " <> types.job_id_to_string(job_id),
-                      )
-                      Ok(validated_url)
-                    }
-                    Error(_) -> Error("Failed to create job for: " <> url)
-                  }
-                }
-                Error(reason) ->
-                  Error("Invalid URL (" <> reason <> "): " <> url)
+                Ok(valid_url) -> Ok(valid_url)
+                Error(_) -> Error(Nil)
               }
             })
 
-          // Count successes and failures
-          let successes =
-            list.filter(results, fn(r) {
-              case r {
-                Ok(_) -> True
-                Error(_) -> False
-              }
-            })
-          let success_count = list.length(successes)
           let total_count = list.length(urls)
+          let valid_count = list.length(validated)
 
-          io.println(
-            "Batch created: "
-            <> int.to_string(success_count)
-            <> "/"
-            <> int.to_string(total_count)
-            <> " jobs",
-          )
-
-          // Redirect to queue page to show the new jobs
-          redirect(to: "/queue")
+          case valid_count {
+            0 -> {
+              templates.layout(
+                "No Valid URLs",
+                templates.error_page(
+                  400,
+                  "No valid URLs provided (0/"
+                    <> int.to_string(total_count)
+                    <> " were valid)",
+                ),
+              )
+              |> html_response(400, _)
+            }
+            _ -> {
+              // Use batch insert for efficiency (handles 500+ URLs efficiently)
+              let timestamp = get_timestamp()
+              case repo.insert_jobs_batch(ctx.db, validated, timestamp) {
+                Ok(inserted_count) -> {
+                  io.println(
+                    "Batch created: "
+                    <> int.to_string(inserted_count)
+                    <> " jobs (from "
+                    <> int.to_string(valid_count)
+                    <> " valid URLs out of "
+                    <> int.to_string(total_count)
+                    <> " total)",
+                  )
+                  // Redirect to queue page to show the new jobs
+                  redirect(to: "/queue")
+                }
+                Error(err) -> {
+                  io.println("Batch insert failed: " <> string.inspect(err))
+                  templates.layout(
+                    "Error",
+                    templates.error_page(500, "Failed to create batch jobs"),
+                  )
+                  |> html_response(500, _)
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -283,10 +292,87 @@ pub fn about(_req: Request, _ctx: Context) -> Response {
   |> html_response(200, _)
 }
 
-/// Settings page handler
+/// Settings page handler - load config from database
 pub fn settings(_req: Request, ctx: Context) -> Response {
-  templates.layout("Settings", templates.settings_page(ctx.output_directory))
-  |> html_response(200, _)
+  case repo.get_download_config(ctx.db) {
+    Ok(config) -> {
+      templates.layout("Settings", templates.settings_page(config))
+      |> html_response(200, _)
+    }
+    Error(_) -> {
+      // Fallback to default config if database read fails
+      templates.layout(
+        "Settings",
+        templates.settings_page(ytdlp.default_config()),
+      )
+      |> html_response(200, _)
+    }
+  }
+}
+
+/// Update download settings handler
+pub fn update_settings(req: Request, ctx: Context) -> Response {
+  use form_data <- wisp.require_form(req)
+
+  // Parse form fields with defaults
+  let output_directory =
+    get_form_string(form_data.values, "output_directory", "./downloads")
+  let format =
+    get_form_string(
+      form_data.values,
+      "format",
+      "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    )
+  let max_filesize = get_form_string(form_data.values, "max_filesize", "2G")
+  let audio_only = get_form_bool(form_data.values, "audio_only")
+  let audio_format =
+    ytdlp.string_to_audio_format(get_form_string(
+      form_data.values,
+      "audio_format",
+      "best",
+    ))
+  let allow_playlist = get_form_bool(form_data.values, "allow_playlist")
+  let download_timeout_minutes =
+    get_form_int(form_data.values, "download_timeout_minutes", 30)
+  let rate_limit_delay_ms =
+    get_form_int(form_data.values, "rate_limit_delay_ms", 500)
+  let bandwidth_limit = get_form_string(form_data.values, "bandwidth_limit", "")
+  let use_channel_folders =
+    get_form_bool(form_data.values, "use_channel_folders")
+
+  // Build the config
+  let config =
+    ytdlp.DownloadConfig(
+      output_directory: output_directory,
+      format: format,
+      max_filesize: max_filesize,
+      audio_only: audio_only,
+      audio_format: audio_format,
+      allow_playlist: allow_playlist,
+      download_timeout_ms: download_timeout_minutes * 60_000,
+      rate_limit_delay_ms: rate_limit_delay_ms,
+      bandwidth_limit: bandwidth_limit,
+      use_channel_folders: use_channel_folders,
+    )
+
+  // Get current timestamp
+  let timestamp = get_timestamp()
+
+  // Save to database
+  case repo.update_download_config(ctx.db, config, timestamp) {
+    Ok(_) -> {
+      io.println("✅ Download settings updated")
+      redirect("/settings")
+    }
+    Error(err) -> {
+      io.println("❌ Failed to save settings: " <> string.inspect(err))
+      templates.layout(
+        "Error",
+        templates.error_page(500, "Failed to save settings"),
+      )
+      |> html_response(500, _)
+    }
+  }
 }
 
 /// Open downloads folder handler - opens the downloads directory in file manager
@@ -543,8 +629,16 @@ fn hex_digit(n: Int) -> String {
 }
 
 /// Get current Unix timestamp
-@external(erlang, "os", "system_time")
-fn get_timestamp() -> Int
+type TimeUnit {
+  Second
+}
+
+@external(erlang, "erlang", "system_time")
+fn get_system_time_seconds(unit: TimeUnit) -> Int
+
+fn get_timestamp() -> Int {
+  get_system_time_seconds(Second)
+}
 
 // =============================================================================
 // Subscription Handlers
@@ -583,7 +677,7 @@ pub fn update_subscription_config(req: Request, ctx: Context) -> Response {
   let poll_interval =
     get_form_int(form_data.values, "poll_interval_minutes", 60)
   let browser =
-    get_form_string(form_data.values, "browser", "firefox")
+    get_form_string(form_data.values, "browser", "chromium")
     |> subscription_types.string_to_browser
   let max_age_days = get_form_int(form_data.values, "max_age_days", 7)
   let min_duration = get_form_int(form_data.values, "min_duration_seconds", 120)

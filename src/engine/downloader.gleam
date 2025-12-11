@@ -6,6 +6,7 @@ import domain/core_types.{DownloadComplete, DownloadFailed}
 import domain/types.{
   type DownloadResult, type JobId, type ManagerMessage, UpdateProgress,
 }
+import engine/nfo
 import engine/parser
 import engine/shell
 import engine/ytdlp
@@ -67,6 +68,52 @@ fn find_downloaded_file(
   }
 }
 
+/// Generate NFO sidecar file from the .info.json file
+/// Searches for the corresponding .info.json file and generates .nfo
+fn generate_nfo_sidecar(video_path: String, output_directory: String) -> Nil {
+  // Find the .info.json file that matches the video
+  // yt-dlp creates {title}.info.json alongside {title}.mp4
+  let video_basename = get_basename_without_ext(video_path)
+
+  case simplifile.read_directory(output_directory) {
+    Ok(files) -> {
+      // Find matching .info.json file
+      let info_json_opt =
+        files
+        |> list.filter(fn(f) {
+          string.ends_with(f, ".info.json")
+          && string.starts_with(f, video_basename)
+        })
+        |> list.first
+
+      case info_json_opt {
+        Ok(info_json_file) -> {
+          let info_json_path = output_directory <> "/" <> info_json_file
+          // Generate NFO (ignore errors - NFO is nice to have, not critical)
+          let _ = nfo.generate_nfo_from_info_json(info_json_path)
+          Nil
+        }
+        Error(_) -> Nil
+      }
+    }
+    Error(_) -> Nil
+  }
+}
+
+/// Get basename of a file path without extension
+fn get_basename_without_ext(path: String) -> String {
+  let parts = string.split(path, "/")
+  let filename = case list.last(parts) {
+    Ok(f) -> f
+    Error(_) -> path
+  }
+  // Remove extension
+  case string.split(filename, ".") {
+    [base, ..] -> base
+    [] -> filename
+  }
+}
+
 /// Handle messages sent to the downloader actor
 fn handle_message(
   state: DownloaderState,
@@ -123,7 +170,11 @@ fn execute_download_streaming(
             0 -> {
               // Exit code 0 - check for downloaded file
               case find_downloaded_file(job_id, config.output_directory) {
-                Ok(path) -> DownloadComplete(job_id, path)
+                Ok(path) -> {
+                  // Generate NFO sidecar file
+                  generate_nfo_sidecar(path, config.output_directory)
+                  DownloadComplete(job_id, path)
+                }
                 Error(_) -> {
                   // Exit code 0 but no file found - unexpected
                   DownloadFailed(
@@ -139,6 +190,8 @@ fn execute_download_streaming(
               case find_downloaded_file(job_id, config.output_directory) {
                 Ok(path) -> {
                   // File exists despite non-zero exit code - treat as success
+                  // Generate NFO sidecar file
+                  generate_nfo_sidecar(path, config.output_directory)
                   DownloadComplete(job_id, path)
                 }
                 Error(_) -> {

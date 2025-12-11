@@ -145,7 +145,7 @@ pub fn string_to_browser(s: String) -> Browser {
     "brave" -> Brave
     "safari" -> Safari
     "opera" -> Opera
-    _ -> Firefox
+    _ -> Chromium
   }
 }
 
@@ -176,7 +176,7 @@ pub fn default_config() -> SubscriptionConfig {
   SubscriptionConfig(
     enabled: False,
     poll_interval_minutes: 60,
-    browser: Firefox,
+    browser: Chromium,
     cookies_path: option.None,
     max_age_days: 7,
     min_duration_seconds: 120,

@@ -88,7 +88,7 @@ fn handle_message(
       case state.config.enabled, state.is_polling {
         True, False -> {
           // Start polling
-          io.println("Starting subscription feed poll...")
+          log_poll_start()
           let new_state = SubscriptionState(..state, is_polling: True)
           let poll_result = execute_poll(new_state)
 
@@ -108,15 +108,11 @@ fn handle_message(
             )
 
           // Log result
-          io.println(
-            "Poll complete: found="
-            <> int.to_string(poll_result.total_found)
-            <> " new="
-            <> int.to_string(poll_result.new_videos)
-            <> " queued="
-            <> int.to_string(poll_result.queued_for_download)
-            <> " skipped="
-            <> int.to_string(poll_result.skipped),
+          log_poll_end(
+            poll_result.total_found,
+            poll_result.new_videos,
+            poll_result.queued_for_download,
+            poll_result.skipped,
           )
 
           // Schedule next poll
@@ -403,6 +399,55 @@ fn bool_to_string(b: Bool) -> String {
   }
 }
 
-/// Get current Unix timestamp
-@external(erlang, "os", "system_time")
-fn get_timestamp() -> Int
+/// Get current Unix timestamp in seconds
+fn get_timestamp() -> Int {
+  get_system_time_seconds(Second)
+}
+
+type TimeUnit {
+  Second
+}
+
+@external(erlang, "erlang", "system_time")
+fn get_system_time_seconds(unit: TimeUnit) -> Int
+
+// Structured logging functions
+fn log_poll_start() -> Nil {
+  let timestamp = format_timestamp(get_timestamp())
+  io.println("[" <> timestamp <> "] [SUBSCRIPTION] POLL_START")
+}
+
+fn log_poll_end(found: Int, new: Int, queued: Int, skipped: Int) -> Nil {
+  let timestamp = format_timestamp(get_timestamp())
+  io.println(
+    "["
+    <> timestamp
+    <> "] [SUBSCRIPTION] POLL_END found="
+    <> int.to_string(found)
+    <> " new="
+    <> int.to_string(new)
+    <> " queued="
+    <> int.to_string(queued)
+    <> " skipped="
+    <> int.to_string(skipped),
+  )
+}
+
+fn format_timestamp(ts: Int) -> String {
+  // Convert seconds to ISO-8601 format
+  // calendar:system_time_to_rfc3339 returns a charlist, so we convert to binary
+  format_iso8601_raw(ts, [#(Unit, Second)])
+  |> charlist_to_string
+}
+
+@external(erlang, "calendar", "system_time_to_rfc3339")
+fn format_iso8601_raw(ts: Int, opts: List(#(FormatOpt, TimeUnit))) -> Charlist
+
+@external(erlang, "erlang", "list_to_binary")
+fn charlist_to_string(charlist: Charlist) -> String
+
+type Charlist
+
+type FormatOpt {
+  Unit
+}

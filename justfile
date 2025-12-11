@@ -81,6 +81,7 @@ run-erlang:
 run-javascript:
     gleam run --target javascript
 
+
 # Add a new dependency
 add-dep dep:
     gleam add {{dep}}

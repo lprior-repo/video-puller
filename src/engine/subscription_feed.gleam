@@ -7,6 +7,8 @@ import domain/subscription_types.{
 }
 import engine/shell
 import gleam/dynamic/decode
+import gleam/float
+import gleam/int
 import gleam/io
 import gleam/json
 import gleam/list
@@ -16,7 +18,8 @@ import gleam/string
 /// YouTube subscription feed URL
 const subscription_feed_url = "https://www.youtube.com/feed/subscriptions"
 
-/// Fetch videos from subscription feed
+/// Fetch videos from subscription feed with timeout
+/// Timeout is set to 5 minutes to prevent hung yt-dlp processes
 pub fn fetch_feed(
   config: SubscriptionConfig,
 ) -> Result(List(DiscoveredVideo), String) {
@@ -24,7 +27,10 @@ pub fn fetch_feed(
 
   io.println("Fetching subscription feed...")
 
-  case shell.run("yt-dlp", args) {
+  // 5 minute timeout for feed fetch
+  let timeout_ms = 300_000
+
+  case shell.run_with_timeout("yt-dlp", args, timeout_ms) {
     Ok(result) -> {
       case result.exit_code {
         0 -> parse_feed_output(result.stdout)
@@ -50,11 +56,11 @@ pub fn fetch_feed(
 pub fn build_feed_args(config: SubscriptionConfig) -> List(String) {
   let browser_arg = subscription_types.browser_to_string(config.browser)
 
-  // Base args for fetching subscription feed metadata only
+  // Base args for fetching subscription feed with full metadata
+  // Removed --flat-playlist to get full metadata including timestamps
   let base_args = [
     "--cookies-from-browser",
     browser_arg,
-    "--flat-playlist",
     "--dump-json",
     "--no-download",
     "--no-warnings",
@@ -101,34 +107,51 @@ pub fn parse_feed_output(
 
 /// Parse a single JSON line into DiscoveredVideo
 fn parse_video_json(json_str: String) -> Result(DiscoveredVideo, String) {
+  // Debug: print first few chars and length
+  let len = string.length(json_str)
   case json.parse(json_str, video_decoder()) {
     Ok(video) -> Ok(video)
-    Error(_) -> Error("Invalid JSON: " <> string.slice(json_str, 0, 100))
+    Error(err) -> {
+      io.println(
+        "JSON parse error (len="
+        <> int.to_string(len)
+        <> "): "
+        <> string.inspect(err),
+      )
+      Error("Invalid JSON: " <> string.slice(json_str, 0, 100))
+    }
   }
+}
+
+/// Helper to make a decoder that returns None if field is missing
+fn optional_at(
+  path: List(String),
+  inner: decode.Decoder(a),
+) -> decode.Decoder(option.Option(a)) {
+  decode.one_of(decode.at(path, inner) |> decode.map(Some), or: [
+    decode.success(None),
+  ])
 }
 
 /// JSON decoder for video data from yt-dlp
 fn video_decoder() -> decode.Decoder(DiscoveredVideo) {
   use id <- decode.then(decode.at(["id"], decode.string))
   use title <- decode.then(decode.at(["title"], decode.string))
-  use channel_id <- decode.then(
-    decode.optional(decode.at(["channel_id"], decode.string)),
-  )
-  use channel <- decode.then(
-    decode.optional(decode.at(["channel"], decode.string)),
-  )
-  use uploader <- decode.then(
-    decode.optional(decode.at(["uploader"], decode.string)),
-  )
-  use duration <- decode.then(
-    decode.optional(decode.at(["duration"], decode.int)),
-  )
-  use thumbnail <- decode.then(
-    decode.optional(decode.at(["thumbnail"], decode.string)),
-  )
-  use timestamp <- decode.then(
-    decode.optional(decode.at(["timestamp"], decode.int)),
-  )
+  // Use optional_at helper for fields that may be missing entirely
+  use channel_id <- decode.then(optional_at(["channel_id"], decode.string))
+  use channel <- decode.then(optional_at(["channel"], decode.string))
+  use uploader <- decode.then(optional_at(["uploader"], decode.string))
+  // Duration can be int or float from yt-dlp - use float
+  use duration_float <- decode.then(optional_at(["duration"], decode.float))
+  use thumbnail <- decode.then(optional_at(["thumbnail"], decode.string))
+  // Timestamp can be int or missing
+  use timestamp <- decode.then(optional_at(["timestamp"], decode.int))
+
+  // Convert duration float to int
+  let duration = case duration_float {
+    Some(d) -> Some(float.truncate(d))
+    None -> None
+  }
 
   // Use channel or uploader for channel_name
   let channel_name = case channel {
@@ -161,7 +184,6 @@ pub fn test_feed_access(config: SubscriptionConfig) -> Result(String, String) {
       browser_arg,
       "--cookies",
       path,
-      "--flat-playlist",
       "--dump-json",
       "--playlist-items",
       "1",
@@ -171,7 +193,6 @@ pub fn test_feed_access(config: SubscriptionConfig) -> Result(String, String) {
     None -> [
       "--cookies-from-browser",
       browser_arg,
-      "--flat-playlist",
       "--dump-json",
       "--playlist-items",
       "1",
@@ -180,7 +201,10 @@ pub fn test_feed_access(config: SubscriptionConfig) -> Result(String, String) {
     ]
   }
 
-  case shell.run("yt-dlp", args) {
+  // 1 minute timeout for test
+  let timeout_ms = 60_000
+
+  case shell.run_with_timeout("yt-dlp", args, timeout_ms) {
     Ok(result) -> {
       case result.exit_code {
         0 -> Ok("Feed access successful")
@@ -208,7 +232,10 @@ pub fn get_video_info(
     url,
   ]
 
-  case shell.run("yt-dlp", args) {
+  // 2 minute timeout for single video info
+  let timeout_ms = 120_000
+
+  case shell.run_with_timeout("yt-dlp", args, timeout_ms) {
     Ok(result) -> {
       case result.exit_code {
         0 -> parse_video_json(string.trim(result.stdout))

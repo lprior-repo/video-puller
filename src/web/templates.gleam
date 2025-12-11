@@ -11,6 +11,7 @@ import domain/subscription_types.{
 }
 import domain/types.{type VideoJob}
 import engine/video_filter
+import engine/ytdlp
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
@@ -976,83 +977,331 @@ fn progress_section(status: VideoStatus) -> Element(a) {
   }
 }
 
-/// Settings page content
-pub fn settings_page(output_directory: String) -> Element(a) {
+/// Settings page content - now with editable download configuration
+pub fn settings_page(config: ytdlp.DownloadConfig) -> Element(a) {
   div([], [
-    h2([class("text-2xl font-bold mb-6")], [text("Settings")]),
-    // Download Settings Section
-    div([class("settings-section")], [
-      html.h3([], [text("Download Settings")]),
-      div([class("setting-row")], [
-        div([], [
-          div([class("setting-label")], [text("Output Directory")]),
-          div([class("setting-description")], [
-            text("Where downloaded videos will be saved"),
+    h2([class("text-2xl font-bold mb-6")], [text("Download Settings")]),
+    // Download Settings Form
+    html.form([attribute("method", "POST"), attribute("action", "/settings")], [
+      div([class("settings-section")], [
+        html.h3([], [text("Output & Organization")]),
+        // Output Directory
+        div([class("setting-row")], [
+          div([], [
+            html.label(
+              [class("setting-label"), attribute("for", "output_directory")],
+              [
+                text("Output Directory"),
+              ],
+            ),
+            div([class("setting-description")], [
+              text("Where downloaded videos will be saved"),
+            ]),
+          ]),
+          input([
+            type_("text"),
+            class("setting-input"),
+            attribute("name", "output_directory"),
+            attribute("id", "output_directory"),
+            attribute("value", config.output_directory),
           ]),
         ]),
-        input([
-          type_("text"),
-          class("setting-input"),
-          attribute("value", output_directory),
-          attribute("disabled", ""),
+        // Channel Folders Toggle
+        div([class("setting-row")], [
+          div([], [
+            html.label(
+              [class("setting-label"), attribute("for", "use_channel_folders")],
+              [
+                text("Organize by Channel"),
+              ],
+            ),
+            div([class("setting-description")], [
+              text("Create subfolders for each channel (Plex TV show style)"),
+            ]),
+          ]),
+          div([class("toggle-container")], [
+            input(
+              list.flatten([
+                [
+                  type_("checkbox"),
+                  class("toggle-checkbox"),
+                  attribute("name", "use_channel_folders"),
+                  attribute("id", "use_channel_folders"),
+                  attribute("value", "true"),
+                ],
+                case config.use_channel_folders {
+                  True -> [attribute("checked", "")]
+                  False -> []
+                },
+              ]),
+            ),
+            html.label(
+              [class("toggle-label"), attribute("for", "use_channel_folders")],
+              [],
+            ),
+          ]),
         ]),
       ]),
-      div([class("setting-row")], [
-        div([], [
-          div([class("setting-label")], [text("Max Concurrent Downloads")]),
-          div([class("setting-description")], [
-            text("Number of simultaneous downloads allowed"),
+      div([class("settings-section")], [
+        html.h3([], [text("Quality & Format")]),
+        // Format String
+        div([class("setting-row")], [
+          div([], [
+            html.label([class("setting-label"), attribute("for", "format")], [
+              text("Format Selection"),
+            ]),
+            div([class("setting-description")], [
+              text("yt-dlp format string (e.g., 'best', 'bestvideo+bestaudio')"),
+            ]),
+          ]),
+          input([
+            type_("text"),
+            class("setting-input"),
+            attribute("name", "format"),
+            attribute("id", "format"),
+            attribute("value", config.format),
           ]),
         ]),
-        input([
-          type_("number"),
-          class("setting-input"),
-          attribute("value", "3"),
-          attribute("min", "1"),
-          attribute("max", "10"),
-          attribute("disabled", ""),
-        ]),
-      ]),
-      div([class("setting-row")], [
-        div([], [
-          div([class("setting-label")], [text("Default Quality")]),
-          div([class("setting-description")], [
-            text("Preferred video quality for downloads"),
+        // Max Filesize
+        div([class("setting-row")], [
+          div([], [
+            html.label(
+              [class("setting-label"), attribute("for", "max_filesize")],
+              [
+                text("Max File Size"),
+              ],
+            ),
+            div([class("setting-description")], [
+              text("Skip videos larger than this (e.g., '2G', '500M')"),
+            ]),
+          ]),
+          input([
+            type_("text"),
+            class("setting-input"),
+            attribute("name", "max_filesize"),
+            attribute("id", "max_filesize"),
+            attribute("value", config.max_filesize),
           ]),
         ]),
-        html.select([class("setting-select"), attribute("disabled", "")], [
-          html.option(
-            [attribute("value", "best"), attribute("selected", "")],
-            "Best Available",
+        // Audio Only Toggle
+        div([class("setting-row")], [
+          div([], [
+            html.label(
+              [class("setting-label"), attribute("for", "audio_only")],
+              [
+                text("Audio Only Mode"),
+              ],
+            ),
+            div([class("setting-description")], [
+              text("Extract audio only, no video"),
+            ]),
+          ]),
+          div([class("toggle-container")], [
+            input(
+              list.flatten([
+                [
+                  type_("checkbox"),
+                  class("toggle-checkbox"),
+                  attribute("name", "audio_only"),
+                  attribute("id", "audio_only"),
+                  attribute("value", "true"),
+                ],
+                case config.audio_only {
+                  True -> [attribute("checked", "")]
+                  False -> []
+                },
+              ]),
+            ),
+            html.label(
+              [class("toggle-label"), attribute("for", "audio_only")],
+              [],
+            ),
+          ]),
+        ]),
+        // Audio Format
+        div([class("setting-row")], [
+          div([], [
+            html.label(
+              [class("setting-label"), attribute("for", "audio_format")],
+              [
+                text("Audio Format"),
+              ],
+            ),
+            div([class("setting-description")], [
+              text("Preferred audio format when extracting audio"),
+            ]),
+          ]),
+          html.select(
+            [
+              class("setting-select"),
+              attribute("name", "audio_format"),
+              attribute("id", "audio_format"),
+            ],
+            [
+              html.option(
+                list.flatten([
+                  [attribute("value", "best")],
+                  case config.audio_format {
+                    ytdlp.BestAudio -> [attribute("selected", "")]
+                    _ -> []
+                  },
+                ]),
+                "Best Available",
+              ),
+              html.option(
+                list.flatten([
+                  [attribute("value", "mp3")],
+                  case config.audio_format {
+                    ytdlp.MP3 -> [attribute("selected", "")]
+                    _ -> []
+                  },
+                ]),
+                "MP3",
+              ),
+              html.option(
+                list.flatten([
+                  [attribute("value", "aac")],
+                  case config.audio_format {
+                    ytdlp.AAC -> [attribute("selected", "")]
+                    _ -> []
+                  },
+                ]),
+                "AAC",
+              ),
+              html.option(
+                list.flatten([
+                  [attribute("value", "opus")],
+                  case config.audio_format {
+                    ytdlp.OPUS -> [attribute("selected", "")]
+                    _ -> []
+                  },
+                ]),
+                "Opus",
+              ),
+            ],
           ),
-          html.option([attribute("value", "1080p")], "1080p"),
-          html.option([attribute("value", "720p")], "720p"),
-          html.option([attribute("value", "480p")], "480p"),
-          html.option([attribute("value", "audio")], "Audio Only"),
+        ]),
+        // Allow Playlist
+        div([class("setting-row")], [
+          div([], [
+            html.label(
+              [class("setting-label"), attribute("for", "allow_playlist")],
+              [
+                text("Allow Playlists"),
+              ],
+            ),
+            div([class("setting-description")], [
+              text("Download entire playlists when URL points to one"),
+            ]),
+          ]),
+          div([class("toggle-container")], [
+            input(
+              list.flatten([
+                [
+                  type_("checkbox"),
+                  class("toggle-checkbox"),
+                  attribute("name", "allow_playlist"),
+                  attribute("id", "allow_playlist"),
+                  attribute("value", "true"),
+                ],
+                case config.allow_playlist {
+                  True -> [attribute("checked", "")]
+                  False -> []
+                },
+              ]),
+            ),
+            html.label(
+              [class("toggle-label"), attribute("for", "allow_playlist")],
+              [],
+            ),
+          ]),
         ]),
       ]),
-    ]),
-    // Appearance Section
-    div([class("settings-section")], [
-      html.h3([], [text("Appearance")]),
-      div([class("setting-row")], [
-        div([], [
-          div([class("setting-label")], [text("Theme")]),
-          div([class("setting-description")], [text("Choose your color scheme")]),
+      div([class("settings-section")], [
+        html.h3([], [text("Performance & Rate Limiting")]),
+        // Download Timeout
+        div([class("setting-row")], [
+          div([], [
+            html.label(
+              [
+                class("setting-label"),
+                attribute("for", "download_timeout_minutes"),
+              ],
+              [
+                text("Download Timeout"),
+              ],
+            ),
+            div([class("setting-description")], [
+              text("Maximum time per download in minutes"),
+            ]),
+          ]),
+          input([
+            type_("number"),
+            class("setting-input"),
+            attribute("name", "download_timeout_minutes"),
+            attribute("id", "download_timeout_minutes"),
+            attribute(
+              "value",
+              int.to_string(config.download_timeout_ms / 60_000),
+            ),
+            attribute("min", "1"),
+            attribute("max", "240"),
+          ]),
         ]),
-        div([], [
-          div([class("theme-option")], [
-            div([class("theme-swatch theme-swatch-neon")], []),
-            span([], [text("Neon Pink (Active)")]),
+        // Rate Limit Delay
+        div([class("setting-row")], [
+          div([], [
+            html.label(
+              [class("setting-label"), attribute("for", "rate_limit_delay_ms")],
+              [
+                text("Rate Limit Delay"),
+              ],
+            ),
+            div([class("setting-description")], [
+              text(
+                "Milliseconds to wait between starting downloads (prevents rate limiting)",
+              ),
+            ]),
           ]),
-          div([class("theme-option")], [
-            div([class("theme-swatch theme-swatch-dark")], []),
-            span([], [text("Dark Mode")]),
+          input([
+            type_("number"),
+            class("setting-input"),
+            attribute("name", "rate_limit_delay_ms"),
+            attribute("id", "rate_limit_delay_ms"),
+            attribute("value", int.to_string(config.rate_limit_delay_ms)),
+            attribute("min", "0"),
+            attribute("max", "10000"),
           ]),
-          div([class("theme-option")], [
-            div([class("theme-swatch theme-swatch-ocean")], []),
-            span([], [text("Ocean Blue")]),
+        ]),
+        // Bandwidth Limit
+        div([class("setting-row")], [
+          div([], [
+            html.label(
+              [class("setting-label"), attribute("for", "bandwidth_limit")],
+              [
+                text("Bandwidth Limit"),
+              ],
+            ),
+            div([class("setting-description")], [
+              text(
+                "Per-download bandwidth limit (e.g., '5M' for 5MB/s, empty for unlimited)",
+              ),
+            ]),
           ]),
+          input([
+            type_("text"),
+            class("setting-input"),
+            attribute("name", "bandwidth_limit"),
+            attribute("id", "bandwidth_limit"),
+            attribute("value", config.bandwidth_limit),
+            attribute("placeholder", "Unlimited"),
+          ]),
+        ]),
+      ]),
+      // Submit button
+      div([class("settings-actions")], [
+        html.button([type_("submit"), class("btn btn-primary")], [
+          text("Save Settings"),
         ]),
       ]),
     ]),
@@ -1071,12 +1320,6 @@ pub fn settings_page(output_directory: String) -> Element(a) {
         div([class("setting-label")], [text("Database")]),
         span([class("text-gray-400")], [text("SQLite 3.x")]),
       ]),
-    ]),
-    // Note about settings
-    div([class("settings-note")], [
-      text(
-        "Settings are currently read-only. Configuration is managed via environment variables and the config file.",
-      ),
     ]),
   ])
 }
@@ -1640,5 +1883,13 @@ fn format_timestamp(ts: Int) -> String {
 }
 
 /// Get current Unix timestamp
-@external(erlang, "os", "system_time")
-fn get_timestamp() -> Int
+type TimeUnit {
+  Second
+}
+
+@external(erlang, "erlang", "system_time")
+fn get_system_time_seconds(unit: TimeUnit) -> Int
+
+fn get_timestamp() -> Int {
+  get_system_time_seconds(Second)
+}

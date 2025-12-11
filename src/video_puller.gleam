@@ -136,6 +136,13 @@ fn default_download_config() -> ytdlp.DownloadConfig {
   let audio_format =
     ytdlp.string_to_audio_format(get_env_string("AUDIO_FORMAT", "best"))
   let allow_playlist = get_env_bool("ALLOW_PLAYLIST", False)
+  // Download timeout in minutes, default to 30 minutes
+  let download_timeout_minutes = get_env_int("DOWNLOAD_TIMEOUT_MINUTES", 30)
+  // Rate limiting for massive downloads
+  let rate_limit_delay_ms = get_env_int("RATE_LIMIT_DELAY_MS", 500)
+  let bandwidth_limit = get_env_string("BANDWIDTH_LIMIT", "")
+  // Channel-based folder organization for Plex TV show style libraries
+  let use_channel_folders = get_env_bool("USE_CHANNEL_FOLDERS", False)
 
   ytdlp.DownloadConfig(
     output_directory: output_dir,
@@ -144,6 +151,10 @@ fn default_download_config() -> ytdlp.DownloadConfig {
     audio_only: audio_only,
     audio_format: audio_format,
     allow_playlist: allow_playlist,
+    download_timeout_ms: download_timeout_minutes * 60_000,
+    rate_limit_delay_ms: rate_limit_delay_ms,
+    bandwidth_limit: bandwidth_limit,
+    use_channel_folders: use_channel_folders,
   )
 }
 

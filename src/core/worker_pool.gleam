@@ -9,8 +9,8 @@
 /// This is the heart of the massive parallelism support.
 import core/pool_types.{
   type PoolMessage, type PoolStats, GetStatus, HealthCheck, PoolStats,
-  PoolStatus, ProcessQueue, ScaleWorkers, SetSelf, Shutdown, SubmitJob,
-  WorkerDone, WorkerFailed,
+  PoolStatus, ProcessQueue, RateLimitedDispatch, ScaleWorkers, SetSelf, Shutdown,
+  SubmitJob, WorkerDone, WorkerFailed,
 }
 import domain/core_types.{
   type DownloadResult, type JobId, Completed, DownloadComplete, DownloadFailed,
@@ -50,6 +50,8 @@ pub opaque type WorkerPoolState {
     self: Option(Subject(PoolMessage)),
     // Statistics for adaptive scaling
     stats: PoolStats,
+    // Rate limiting: timestamp of last job dispatch
+    last_dispatch_ts: Int,
   )
 }
 
@@ -114,6 +116,7 @@ pub fn start(
         avg_completion_time_ms: 0,
         queue_high_water_mark: 0,
       ),
+      last_dispatch_ts: 0,
     )
 
   actor.start(
@@ -143,10 +146,15 @@ fn handle_pool_message(
     }
 
     SubmitJob(job_id, url) -> {
-      // Try to assign to an available worker immediately
-      case state.available_workers {
-        [worker, ..rest] -> {
-          // Assign work to available worker
+      // Check rate limiting - convert to milliseconds for comparison
+      let current_time_ms = get_timestamp_ms()
+      let rate_limit_ms = state.config.rate_limit_delay_ms
+      let time_since_last = current_time_ms - state.last_dispatch_ts
+
+      // Check if we can dispatch immediately (rate limit allows and worker available)
+      case state.available_workers, time_since_last >= rate_limit_ms {
+        [worker, ..rest], True -> {
+          // Rate limit allows and worker available - dispatch immediately
           let worker_id = "worker-" <> int.to_string(state.worker_index)
           assign_work_to_worker(
             worker,
@@ -173,11 +181,30 @@ fn handle_pool_message(
               ..state,
               available_workers: rest,
               busy_workers: busy,
+              last_dispatch_ts: current_time_ms,
             ),
           )
         }
 
-        [] -> {
+        [_worker, ..], False -> {
+          // Worker available but rate limit prevents dispatch - queue and schedule delayed dispatch
+          let work =
+            PendingWork(job_id: job_id, url: url, queued_at: get_timestamp())
+          let new_queue = list.append(state.work_queue, [work])
+          let delay_needed = rate_limit_ms - time_since_last
+
+          // Schedule rate-limited dispatch
+          case state.self {
+            Some(self) -> {
+              schedule_rate_limited_dispatch(self, delay_needed)
+            }
+            None -> Nil
+          }
+
+          actor.continue(WorkerPoolState(..state, work_queue: new_queue))
+        }
+
+        [], _ -> {
           // No available workers - queue the work
           let work =
             PendingWork(job_id: job_id, url: url, queued_at: get_timestamp())
@@ -442,11 +469,88 @@ fn handle_pool_message(
       }
     }
 
+    RateLimitedDispatch -> {
+      // Handle rate-limited dispatch - try to dispatch queued work respecting rate limits
+      let current_time_ms = get_timestamp_ms()
+      let rate_limit_ms = state.config.rate_limit_delay_ms
+      let time_since_last = current_time_ms - state.last_dispatch_ts
+
+      case
+        state.work_queue,
+        state.available_workers,
+        time_since_last >= rate_limit_ms
+      {
+        [work, ..rest_queue], [worker, ..rest_workers], True -> {
+          // Rate limit allows and worker available - dispatch
+          let worker_id =
+            "worker-rl-" <> int.to_string(state.worker_index + 2000)
+
+          assign_work_to_worker(
+            worker,
+            worker_id,
+            work.job_id,
+            work.url,
+            state.manager_subject,
+            state.self,
+          )
+
+          let busy =
+            dict.insert(
+              state.busy_workers,
+              worker_id,
+              WorkerInfo(
+                job_id: work.job_id,
+                worker: worker,
+                started_at: get_timestamp(),
+              ),
+            )
+
+          let new_state =
+            WorkerPoolState(
+              ..state,
+              work_queue: rest_queue,
+              available_workers: rest_workers,
+              busy_workers: busy,
+              worker_index: state.worker_index + 1,
+              last_dispatch_ts: current_time_ms,
+            )
+
+          // Schedule next rate-limited dispatch if more work
+          case rest_queue {
+            [] -> actor.continue(new_state)
+            _ -> {
+              case state.self {
+                Some(self) ->
+                  schedule_rate_limited_dispatch(self, rate_limit_ms)
+                None -> Nil
+              }
+              actor.continue(new_state)
+            }
+          }
+        }
+
+        [_, ..], _, False -> {
+          // Rate limit not yet satisfied - reschedule
+          let delay_needed = rate_limit_ms - time_since_last
+          case state.self {
+            Some(self) -> schedule_rate_limited_dispatch(self, delay_needed)
+            None -> Nil
+          }
+          actor.continue(state)
+        }
+
+        _, _, _ -> {
+          // No work or no workers - nothing to do
+          actor.continue(state)
+        }
+      }
+    }
+
     HealthCheck -> {
-      // Check for stuck workers (over 30 minute timeout)
+      // Check for stuck workers using configured timeout
       let current_time = get_timestamp()
-      let timeout_threshold = 30 * 60 * 1_000_000_000
-      // 30 minutes in nanoseconds
+      // Convert milliseconds to seconds
+      let timeout_threshold = state.config.download_timeout_ms / 1000
 
       let stuck_workers =
         dict.to_list(state.busy_workers)
@@ -463,13 +567,23 @@ fn handle_pool_message(
             "⚠️  Worker "
             <> worker_id
             <> " appears stuck on job "
-            <> job_id_to_string(info.job_id),
+            <> job_id_to_string(info.job_id)
+            <> " (exceeded "
+            <> int.to_string(st.config.download_timeout_ms / 60_000)
+            <> " minute timeout)",
           )
 
           // Mark job as failed and remove from busy
           process.send(
             st.manager_subject,
-            JobStatusUpdate(info.job_id, Failed("Download timeout exceeded")),
+            JobStatusUpdate(
+              info.job_id,
+              Failed(
+                "Download timeout exceeded "
+                <> int.to_string(st.config.download_timeout_ms / 60_000)
+                <> " minutes",
+              ),
+            ),
           )
 
           // Try to shutdown the stuck worker
@@ -617,10 +731,15 @@ fn execute_download_safely(
         downloader.Download(job_id, url, reply_subject, manager),
       )
 
-      // Wait with timeout (30 minutes)
-      case process.receive(reply_subject, 1_800_000) {
+      // Wait with configurable timeout
+      case process.receive(reply_subject, config.download_timeout_ms) {
         Ok(result) -> Ok(result)
-        Error(_) -> Error("Download timeout exceeded 30 minutes")
+        Error(_) ->
+          Error(
+            "Download timeout exceeded "
+            <> int.to_string(config.download_timeout_ms / 60_000)
+            <> " minutes",
+          )
       }
     }
     Error(_) -> Error("Failed to start downloader actor")
@@ -716,6 +835,29 @@ fn verify_file_exists(
   }
 }
 
-/// Get current Unix timestamp in nanoseconds
-@external(erlang, "os", "system_time")
-fn get_timestamp() -> Int
+/// Get current Unix timestamp in seconds
+type TimeUnit {
+  Second
+  Millisecond
+}
+
+@external(erlang, "erlang", "system_time")
+fn get_system_time(unit: TimeUnit) -> Int
+
+fn get_timestamp() -> Int {
+  get_system_time(Second)
+}
+
+fn get_timestamp_ms() -> Int {
+  get_system_time(Millisecond)
+}
+
+/// Schedule rate-limited dispatch after a delay
+fn schedule_rate_limited_dispatch(
+  pool: Subject(PoolMessage),
+  delay_ms: Int,
+) -> Nil {
+  // Use BEAM's native timer for rate-limited dispatch
+  process.send_after(pool, delay_ms, RateLimitedDispatch)
+  Nil
+}

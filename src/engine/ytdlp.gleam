@@ -36,27 +36,55 @@ pub type DownloadConfig {
     audio_only: Bool,
     audio_format: AudioFormat,
     allow_playlist: Bool,
+    // Download timeout in milliseconds (default: 30 minutes)
+    download_timeout_ms: Int,
+    // Rate limiting: minimum delay between starting downloads (ms)
+    // Helps avoid YouTube rate limits when downloading many videos
+    rate_limit_delay_ms: Int,
+    // Bandwidth limit per download (e.g., "5M" for 5MB/s, "" for unlimited)
+    bandwidth_limit: String,
+    // Organize downloads into channel subfolders: downloads/{channel}/{video}.mp4
+    // For Plex TV show-style library organization
+    use_channel_folders: Bool,
   )
 }
 
 /// Build yt-dlp command arguments for downloading a video
 pub fn build_download_args(
   url: String,
-  job_id: JobId,
+  _job_id: JobId,
   config: DownloadConfig,
   format_code: option.Option(String),
 ) -> Result(List(String), String) {
   // Validate URL to prevent injection
   use _ <- result.try(validate_url(url))
 
-  let id_str = types.job_id_to_string(job_id)
-  let output_template = config.output_directory <> "/" <> id_str <> ".%(ext)s"
+  // Plex-friendly output template varies based on channel folder setting:
+  // - With folders: {dir}/{channel}/{title} ({date}).{ext} - for TV show style libraries
+  // - Without folders: {dir}/{title} - {channel} ({date}).{ext} - flat structure
+  let output_template = case config.use_channel_folders {
+    True ->
+      config.output_directory
+      <> "/%(channel)s/%(title)s (%(upload_date>%Y-%m-%d)s).%(ext)s"
+    False ->
+      config.output_directory
+      <> "/%(title)s - %(channel)s (%(upload_date>%Y-%m-%d)s).%(ext)s"
+  }
 
   // Build base args
   let base_args = [
-    // Output template
+    // Output template - Plex-friendly format (P-002)
     "--output",
     output_template,
+    // Sanitize filenames for filesystem safety (P-002)
+    "--restrict-filenames",
+    // Embed metadata into video file (P-003)
+    "--embed-metadata",
+    "--add-metadata",
+    // Embed thumbnail as cover art/poster (P-004)
+    "--embed-thumbnail",
+    // Save metadata sidecar file for Plex agents
+    "--write-info-json",
     // Max filesize limit
     "--max-filesize",
     config.max_filesize,
@@ -89,13 +117,20 @@ pub fn build_download_args(
     False -> ["--no-playlist"]
   }
 
-  // Combine all args: JS runtime args first, then base args, format, playlist, and URL last
+  // Add bandwidth limiting if configured (helps prevent rate limiting)
+  let bandwidth_args = case config.bandwidth_limit {
+    "" -> []
+    limit -> ["--limit-rate", limit]
+  }
+
+  // Combine all args: JS runtime args first, then base args, format, playlist, bandwidth, and URL last
   Ok(
     list.flatten([
       youtube_js_args(),
       base_args,
       format_args,
       playlist_args,
+      bandwidth_args,
       [url],
     ]),
   )
@@ -180,18 +215,32 @@ pub fn default_config() -> DownloadConfig {
     audio_only: False,
     audio_format: BestAudio,
     allow_playlist: False,
+    // Default to 30 minute timeout
+    download_timeout_ms: 1_800_000,
+    // Rate limiting defaults for massive downloads
+    rate_limit_delay_ms: 500,
+    bandwidth_limit: "",
+    // Channel folders disabled by default for backwards compatibility
+    use_channel_folders: False,
   )
 }
 
 /// Create audio-only download configuration
-pub fn audio_config(format: AudioFormat) -> DownloadConfig {
+pub fn audio_config(_format: AudioFormat) -> DownloadConfig {
   DownloadConfig(
     output_directory: "./downloads",
     format: "bestaudio",
     max_filesize: "500M",
     audio_only: True,
-    audio_format: format,
+    audio_format: BestAudio,
     allow_playlist: False,
+    // Default to 30 minute timeout
+    download_timeout_ms: 1_800_000,
+    // Rate limiting defaults for massive downloads
+    rate_limit_delay_ms: 500,
+    bandwidth_limit: "",
+    // Channel folders disabled by default
+    use_channel_folders: False,
   )
 }
 

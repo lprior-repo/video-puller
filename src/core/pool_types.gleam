@@ -40,6 +40,8 @@ pub type PoolMessage {
   GetStatus(reply: Subject(PoolStatus))
   // Process work queue (internal)
   ProcessQueue
+  // Rate-limited dispatch (internal) - dispatches next queued job after rate limit delay
+  RateLimitedDispatch
   // Periodic health check
   HealthCheck
   // Set self reference

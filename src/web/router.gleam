@@ -39,6 +39,7 @@ fn route(req: Request, ctx: Context) -> Response {
 
     // Settings page
     http.Get, ["settings"] -> handlers.settings(req, ctx)
+    http.Post, ["settings"] -> handlers.update_settings(req, ctx)
 
     // Subscriptions page
     http.Get, ["subscriptions"] -> handlers.subscriptions(req, ctx)

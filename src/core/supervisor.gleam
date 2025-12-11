@@ -238,11 +238,13 @@ fn manager_child_spec(
     )
 
     case
-      manager.start(
+      manager.start_with_workers(
         app_state.db,
         app_state.config,
         app_state.poll_interval_ms,
         app_state.max_concurrency,
+        app_state.min_workers,
+        app_state.max_workers,
       )
     {
       Ok(subject) -> {
@@ -267,11 +269,11 @@ fn load_app_state(db: Db) -> AppState {
   let config = load_download_config()
   let poll_interval = get_env_int("POLL_INTERVAL_MS", 5000)
 
-  // BEAM-optimized concurrency settings
-  // Default to higher values since BEAM can handle it
-  let max_concurrency = get_env_int("MAX_CONCURRENCY", 10)
-  let min_workers = get_env_int("MIN_WORKERS", 5)
-  let max_workers = get_env_int("MAX_WORKERS", 50)
+  // BEAM-optimized concurrency settings for massive scale
+  // BEAM can easily handle 500+ concurrent processes
+  let max_concurrency = get_env_int("MAX_CONCURRENCY", 100)
+  let min_workers = get_env_int("MIN_WORKERS", 20)
+  let max_workers = get_env_int("MAX_WORKERS", 500)
 
   // Retry configuration
   let retry_config =
@@ -317,6 +319,16 @@ fn load_download_config() -> ytdlp.DownloadConfig {
   let audio_format =
     ytdlp.string_to_audio_format(get_env_string("AUDIO_FORMAT", "best"))
   let allow_playlist = get_env_bool("ALLOW_PLAYLIST", False)
+  // Download timeout in minutes, default to 30 minutes
+  let download_timeout_minutes = get_env_int("DOWNLOAD_TIMEOUT_MINUTES", 30)
+
+  // Rate limiting for massive downloads
+  // Default 500ms between downloads to avoid YouTube rate limits
+  let rate_limit_delay_ms = get_env_int("RATE_LIMIT_DELAY_MS", 500)
+  // Bandwidth limit per download (e.g., "5M", "10M", "" for unlimited)
+  let bandwidth_limit = get_env_string("BANDWIDTH_LIMIT", "")
+  // Channel-based folder organization for Plex TV show style libraries
+  let use_channel_folders = get_env_bool("USE_CHANNEL_FOLDERS", False)
 
   ytdlp.DownloadConfig(
     output_directory: output_dir,
@@ -325,6 +337,10 @@ fn load_download_config() -> ytdlp.DownloadConfig {
     audio_only: audio_only,
     audio_format: audio_format,
     allow_playlist: allow_playlist,
+    download_timeout_ms: download_timeout_minutes * 60_000,
+    rate_limit_delay_ms: rate_limit_delay_ms,
+    bandwidth_limit: bandwidth_limit,
+    use_channel_folders: use_channel_folders,
   )
 }
 

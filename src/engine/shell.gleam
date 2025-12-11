@@ -47,6 +47,101 @@ pub fn run(
   }
 }
 
+/// Execute a shell command with a timeout (in milliseconds)
+///
+/// If the command doesn't complete within the timeout, it returns an error.
+///
+/// ## Examples
+///
+/// ```gleam
+/// run_with_timeout("yt-dlp", ["--help"], 30_000)
+/// // -> Ok(ShellResult(...)) or Error(ExecutionError("Timeout"))
+/// ```
+pub fn run_with_timeout(
+  command: String,
+  args: List(String),
+  timeout_ms: Int,
+) -> Result(ShellResult, ShellError) {
+  // Validate command doesn't contain shell metacharacters
+  case validate_command(command) {
+    Error(e) -> Error(e)
+    Ok(_) -> {
+      // Use streaming execution with timeout
+      use stream <- result.try(open_stream(command, args))
+
+      case read_with_timeout(stream, timeout_ms, [], []) {
+        Ok(#(exit_code, stdout_lines, stderr_lines)) -> {
+          close_stream(stream)
+          Ok(ShellResult(
+            exit_code: exit_code,
+            stdout: string.join(stdout_lines, "\n"),
+            stderr: string.join(stderr_lines, "\n"),
+          ))
+        }
+        Error(e) -> {
+          close_stream(stream)
+          Error(e)
+        }
+      }
+    }
+  }
+}
+
+/// Read from stream with timeout
+fn read_with_timeout(
+  stream: StreamingPort,
+  timeout_ms: Int,
+  stdout_acc: List(String),
+  stderr_acc: List(String),
+) -> Result(#(Int, List(String), List(String)), ShellError) {
+  case read_stream_line_with_timeout(stream, timeout_ms) {
+    Ok(OutputLine(line)) -> {
+      // All output goes to stdout (stderr is harder to separate in ports)
+      read_with_timeout(stream, timeout_ms, [line, ..stdout_acc], stderr_acc)
+    }
+    Ok(ProcessExit(code)) -> {
+      // Continue reading to drain remaining output
+      read_with_timeout(stream, timeout_ms, stdout_acc, stderr_acc)
+      |> result.map(fn(res) {
+        let #(_, out, err) = res
+        #(code, out, err)
+      })
+      |> result.or(
+        Ok(#(code, list.reverse(stdout_acc), list.reverse(stderr_acc))),
+      )
+    }
+    Ok(EndOfStream) -> {
+      Ok(#(0, list.reverse(stdout_acc), list.reverse(stderr_acc)))
+    }
+    Ok(StreamError(_)) -> {
+      Ok(#(1, list.reverse(stdout_acc), list.reverse(stderr_acc)))
+    }
+    Error(Timeout) -> {
+      Error(ExecutionError("Command timeout exceeded"))
+    }
+  }
+}
+
+/// Timeout error for stream reading
+type TimeoutError {
+  Timeout
+}
+
+/// Read a line from stream with timeout
+fn read_stream_line_with_timeout(
+  stream: StreamingPort,
+  timeout_ms: Int,
+) -> Result(StreamLine, TimeoutError) {
+  // Use erlang receive with timeout
+  do_read_line_timeout(stream.port, timeout_ms)
+}
+
+@external(erlang, "shell_ffi", "read_line_timeout")
+fn do_read_line_timeout(
+  port: Port,
+  timeout_ms: Int,
+) -> Result(StreamLine, TimeoutError)
+
 /// Execute a command and return only stdout on success
 pub fn run_simple(
   command: String,
