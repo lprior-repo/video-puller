@@ -46,6 +46,7 @@ do_open_port(ExecutableChars, Args) ->
     end.
 
 %% Build environment with Node in PATH for yt-dlp JS interpreter
+%% Also sets XDG_CURRENT_DESKTOP for proper keyring access on Wayland compositors
 build_env_with_node_path() ->
     CurrentPath = os:getenv("PATH", "/usr/bin:/bin"),
     Home = os:getenv("HOME", ""),
@@ -64,7 +65,9 @@ build_env_with_node_path() ->
     %% Filter out empty paths and combine
     ValidNodePaths = [P || P <- NodePaths, P =/= "", P =/= "/bin"],
     NewPath = string:join([CurrentPath | ValidNodePaths], ":"),
-    [{"PATH", NewPath}].
+    %% Set XDG_CURRENT_DESKTOP=GNOME to ensure yt-dlp uses GNOME keyring
+    %% for cookie decryption on Wayland compositors like Hyprland/Sway
+    [{"PATH", NewPath}, {"XDG_CURRENT_DESKTOP", "GNOME"}].
 
 %% Read a line from the port (no timeout version for stream_loop)
 %% Returns Gleam StreamLine type directly (not wrapped in Result):
