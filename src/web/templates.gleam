@@ -1334,113 +1334,6 @@ pub fn error_page(code: Int, message: String) -> Element(a) {
   ])
 }
 
-/// Neon Pink Download Card Component
-/// Maps VideoJob status to display with neon pink styling
-pub fn download_card(job: VideoJob) -> Element(a) {
-  let #(card_class, status_text, status_class) = case job.status {
-    Pending -> #(
-      "download-card download-card-queued",
-      "Queued",
-      "status-text-queued",
-    )
-    Downloading(_) -> #(
-      "download-card",
-      "Downloading...",
-      "status-text-downloading",
-    )
-    Completed -> #(
-      "download-card download-card-completed",
-      "Complete",
-      "status-text-completed",
-    )
-    Failed(_) -> #(
-      "download-card download-card-failed",
-      "Failed",
-      "status-text-failed",
-    )
-  }
-
-  div([class(card_class)], [
-    div([class("card-header")], [
-      span([class("card-title")], [text(truncate_url(job.url, 50))]),
-      span([class(status_class)], [text(status_text)]),
-    ]),
-    thick_progress_bar(job.status),
-    speed_status_data(job.status),
-  ])
-}
-
-/// Thick progress bar with oversized percentage display
-fn thick_progress_bar(status: VideoStatus) -> Element(a) {
-  case status {
-    Downloading(progress) -> {
-      let progress_str = int.to_string(progress)
-      div([class("thick-progress-container")], [
-        div(
-          [
-            class("thick-progress-fill"),
-            attribute("style", "width: " <> progress_str <> "%"),
-          ],
-          [],
-        ),
-        span([class("percentage-display")], [text(progress_str <> "%")]),
-      ])
-    }
-    Pending -> {
-      div([class("thick-progress-container")], [
-        div(
-          [class("thick-progress-fill-gray"), attribute("style", "width: 0%")],
-          [],
-        ),
-        span([class("percentage-display percentage-display-gray")], [text("0%")]),
-      ])
-    }
-    Completed -> {
-      div([class("thick-progress-container")], [
-        div(
-          [class("thick-progress-fill"), attribute("style", "width: 100%")],
-          [],
-        ),
-        span([class("percentage-display")], [text("100%")]),
-      ])
-    }
-    Failed(_) -> div([], [])
-  }
-}
-
-/// Speed and status data in green monospace
-fn speed_status_data(status: VideoStatus) -> Element(a) {
-  case status {
-    Downloading(progress) -> {
-      let speed = "Speed: 25.4 MB/s"
-      div([class("speed-data")], [
-        text(
-          "Status: Processing (H.264) | "
-          <> speed
-          <> " | "
-          <> int.to_string(progress)
-          <> "%",
-        ),
-      ])
-    }
-    Pending -> {
-      div([class("speed-data speed-data-gray")], [
-        text("Status: Pending Start | Estimated Size: Unknown"),
-      ])
-    }
-    Completed -> {
-      div([class("speed-data")], [
-        text("Status: Complete | Downloaded Successfully"),
-      ])
-    }
-    Failed(reason) -> {
-      div([class("speed-data status-text-failed")], [
-        text("Status: Failed | Error: " <> reason),
-      ])
-    }
-  }
-}
-
 // =============================================================================
 // Subscription Templates
 // =============================================================================
@@ -1465,7 +1358,7 @@ pub fn subscriptions_page(
       ]),
       p([class("text-sm text-gray-400 mt-2")], [
         text(
-          "Subscription channels are listed in channels.txt beside that folder. Fetches are sequential and use no browser cookies.",
+          "Subscription channels are listed in channels.txt beside that folder. Drop a Google Takeout subscriptions.csv there to import channels without signing in. Fetches are sequential and use no browser cookies.",
         ),
       ]),
     ]),

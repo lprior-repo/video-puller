@@ -152,15 +152,6 @@ mcp__mcp-agent-mail__file_reservation_paths({
 - `granted`: List of successful reservations
 - `conflicts`: Any conflicting reservations with holder info
 
-### Using Nushell Script
-
-```bash
-nu scripts/mcp-reserve-files.nu YourAgentName \
-  --exclusive=true \
-  --ttl=7200 \
-  --reason="Feature development"
-```
-
 ### Renew Reservations
 
 ```javascript
@@ -280,15 +271,9 @@ mcp__mcp-agent-mail__release_build_slot({
 
 ### Solo Development Workflow
 
-1. **Start Session:**
-   ```bash
-   nu scripts/mcp-start-session.nu --task="Adding authentication"
-   ```
+1. **Start Session:** Register and begin a session with the agent-mail MCP tools (see Quick Start above).
 
-2. **Reserve Files:**
-   ```bash
-   nu scripts/mcp-reserve-files.nu YourAgentName
-   ```
+2. **Reserve Files:** Call `mcp__mcp-agent-mail__file_reservation_paths` for the files you plan to edit.
 
 3. **Work on Code**
 
@@ -390,22 +375,6 @@ mcp__mcp-agent-mail__release_build_slot({
 
 Add to your workflow:
 
-### Justfile Commands
-
-```just
-# Start MCP session
-mcp-start:
-    nu scripts/mcp-start-session.nu
-
-# Reserve common files
-mcp-reserve AGENT:
-    nu scripts/mcp-reserve-files.nu {{AGENT}}
-
-# Setup MCP agent
-mcp-setup:
-    nu scripts/setup-mcp-agent.nu
-```
-
 ### Slash Commands
 
 Use in Claude Code:
@@ -429,7 +398,6 @@ Use in Claude Code:
 - All Gleam source: `src/**/*.gleam`
 - All tests: `test/**/*.gleam`
 - Config: `gleam.toml`
-- Scripts: `scripts/*.nu`
 
 ### Important Notes
 

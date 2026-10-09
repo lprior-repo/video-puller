@@ -20,6 +20,7 @@ pub type Layout {
     config_file: String,
     subscriptions_file: String,
     channels_file: String,
+    takeout_file: String,
     library_dir: String,
     work_dir: String,
   )
@@ -50,6 +51,7 @@ pub fn layout(root: String) -> Layout {
     config_file: ytdl_sub_dir <> "/config.yaml",
     subscriptions_file: ytdl_sub_dir <> "/subscriptions.yaml",
     channels_file: ytdl_sub_dir <> "/channels.txt",
+    takeout_file: ytdl_sub_dir <> "/subscriptions.csv",
     library_dir: root <> "/library",
     work_dir: ytdl_sub_dir <> "/working",
   )
@@ -148,6 +150,10 @@ pub fn write_subscriptions(
     <> "    tv_show_directory: \""
     <> escape_yaml(layout.library_dir)
     <> "\"\n"
+    // The resolution assert aborts on any download below 361p, which
+    // false-positives on genuinely low-res uploads and skips them forever;
+    // throttle protection's request pacing stays enabled.
+    <> "    enable_resolution_assert: False\n"
     <> "\n"
     <> "Plex TV Show by Date:\n"
     <> "  = YouTube:\n"
@@ -215,21 +221,35 @@ pub fn run_pull(
   ]
 
   case shell.run_with_timeout(engine_command, args, timeout_ms) {
-    Ok(result) ->
-      case result.exit_code {
-        0 -> Ok(parse_pull_output(result.stdout))
-        _ ->
-          Error(
-            "ytdl-sub failed with exit code "
-            <> int.to_string(result.exit_code)
-            <> ": "
-            <> first_error_line(result.stdout),
-          )
-      }
+    Ok(result) -> interpret_run_result(result.exit_code, result.stdout)
     Error(shell.ExecutionError(message)) ->
       Error("execution error: " <> message)
     Error(shell.InvalidCommand(message)) ->
       Error("invalid command: " <> message)
+  }
+}
+
+/// Decide the outcome of an engine run from its exit code and output
+///
+/// ytdl-sub exits non-zero when any subscription fails, even when other
+/// subscriptions in the same run downloaded successfully. In that case the
+/// added files are kept so callers still record them; the summary's errors
+/// list carries the per-subscription failures.
+pub fn interpret_run_result(
+  exit_code: Int,
+  stdout: String,
+) -> Result(PullSummary, String) {
+  let summary = parse_pull_output(stdout)
+  case exit_code, summary.added_files {
+    0, _ -> Ok(summary)
+    _, [] ->
+      Error(
+        "ytdl-sub failed with exit code "
+        <> int.to_string(exit_code)
+        <> ": "
+        <> first_error_line(stdout),
+      )
+    _, _ -> Ok(summary)
   }
 }
 

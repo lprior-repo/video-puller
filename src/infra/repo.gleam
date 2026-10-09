@@ -209,45 +209,6 @@ pub fn update_path(
   |> result.replace(Nil)
 }
 
-/// Update job metadata (title, thumbnail, duration)
-pub fn update_metadata(
-  conn: Db,
-  job_id: JobId,
-  title: Option(String),
-  thumbnail_url: Option(String),
-  duration_seconds: Option(Int),
-  updated_at: Int,
-) -> Result(Nil, DbError) {
-  let id_str = job_id_to_string(job_id)
-
-  let base_update =
-    update.new()
-    |> update.table("video_jobs")
-    |> update.set(update.set_int("updated_at", updated_at))
-    |> update.where(where.eq(where.col("id"), where.string(id_str)))
-
-  let with_title = case title {
-    Some(t) -> update.set(base_update, update.set_string("title", t))
-    None -> update.set(base_update, update.set_null("title"))
-  }
-
-  let with_thumbnail = case thumbnail_url {
-    Some(u) -> update.set(with_title, update.set_string("thumbnail_url", u))
-    None -> update.set(with_title, update.set_null("thumbnail_url"))
-  }
-
-  let query =
-    case duration_seconds {
-      Some(d) ->
-        update.set(with_thumbnail, update.set_int("duration_seconds", d))
-      None -> update.set(with_thumbnail, update.set_null("duration_seconds"))
-    }
-    |> update.to_query()
-
-  db.run_write(conn, query, decode.dynamic)
-  |> result.replace(Nil)
-}
-
 /// Reset zombie jobs (jobs stuck in 'downloading' state) back to 'pending'
 /// This is run on application startup to recover from crashes
 pub fn reset_zombies(conn: Db, updated_at: Int) -> Result(Int, DbError) {

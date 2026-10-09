@@ -2,5 +2,7 @@
 #
 # One URL per line. Blank lines and # comments are ignored.
 # Keep the list short: ytdl-sub fetches these sequentially.
+# Drop a Google Takeout subscriptions.csv beside this file to import channels
+# without signing in; missing URLs are merged in on the next start or poll.
 #
 # https://www.youtube.com/@example-channel

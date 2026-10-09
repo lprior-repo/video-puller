@@ -276,17 +276,6 @@ just beads-status       # Database overview
 just beads-sync         # Force sync with git
 ```
 
-### Nushell Scripts
-
-Beads scripts available:
-
-```bash
-nu scripts/beads-ready.nu          # Check ready work (JSON)
-nu scripts/beads-create.nu         # Interactive issue creation
-nu scripts/beads-update.nu         # Update issue status
-nu scripts/beads-sync.nu           # Sync and commit
-```
-
 ## MCP Integration
 
 ### Beads MCP Server

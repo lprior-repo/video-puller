@@ -95,7 +95,3 @@ pub fn sqlight_error(err: sqlight.Error) -> String {
     sqlight.SqlightError(_code, message, _offset) -> message
   }
 }
-
-/// Re-export sqlight error type for pattern matching in repos
-pub type SqliteError =
-  sqlight.Error

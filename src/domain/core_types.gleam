@@ -26,22 +26,6 @@ pub type DownloadResult {
   DownloadFailed(job_id: JobId, reason: String)
 }
 
-/// Format option returned by yt-dlp -F command
-pub type FormatOption {
-  FormatOption(code: String, ext: String, resolution: String, note: String)
-}
-
-/// Video metadata extracted from yt-dlp --dump-json
-pub type VideoMetadata {
-  VideoMetadata(
-    title: String,
-    thumbnail: String,
-    duration: Int,
-    uploader: String,
-    view_count: Option(Int),
-  )
-}
-
 /// Complete video job record
 /// Maps to the database video_jobs table
 pub type VideoJob {

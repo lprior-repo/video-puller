@@ -179,6 +179,8 @@ Installation complete.
 
 Next steps:
   1. Add channel URLs to the channel list, then press "Refresh Now" in the UI.
+     Or drop a Google Takeout subscriptions.csv beside it to import your
+     channels without signing in.
      The first poll pulls each channel's full upload history; later polls only
      fetch new uploads, so give large channels time and keep
      POLL_TIMEOUT_MINUTES ($POLL_TIMEOUT_MINUTES) generous.

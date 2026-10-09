@@ -4,6 +4,7 @@
 /// - Preparing the ytdl-sub engine layout for subscription pulls
 /// - Running database migrations (INV-002: must run before app start)
 /// - Fixing zombie jobs (INV-003: revert processing jobs to pending)
+import engine/takeout
 import engine/ytdl_sub
 import envoy
 import gleam/int
@@ -44,6 +45,9 @@ pub fn initialize() -> Result(Db, DbError) {
 
   // Prepare the ytdl-sub engine layout (config, channel list, folders)
   setup_ytdl_sub()
+
+  // Merge a dropped Google Takeout subscriptions.csv into channels.txt
+  takeout.import_and_log(ytdl_sub.layout_from_env())
 
   // Fix zombie jobs
   io.println("🧟 Checking for zombie jobs...")

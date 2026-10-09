@@ -181,11 +181,6 @@ fn int_to_string(n: Int) -> String {
   }
 }
 
-/// Check if yt-dlp is available
-pub fn check_yt_dlp() -> Result(String, ShellError) {
-  run_simple("yt-dlp", ["--version"])
-}
-
 // ============================================================================
 // Streaming Shell Execution using Erlang Ports
 // ============================================================================
@@ -219,10 +214,6 @@ fn do_read_line(port: Port) -> StreamLine
 /// Close a streaming port
 @external(erlang, "shell_ffi", "close_port")
 fn do_close_port(port: Port) -> Nil
-
-/// Check if a port is still alive
-@external(erlang, "shell_ffi", "is_port_alive")
-fn do_is_port_alive(port: Port) -> Bool
 
 /// Open a streaming shell command
 ///
@@ -268,11 +259,6 @@ pub fn read_stream_line(stream: StreamingPort) -> StreamLine {
 /// Close a streaming port and clean up resources
 pub fn close_stream(stream: StreamingPort) -> Nil {
   do_close_port(stream.port)
-}
-
-/// Check if a streaming port is still alive
-pub fn is_stream_alive(stream: StreamingPort) -> Bool {
-  do_is_port_alive(stream.port)
 }
 
 /// Execute a command with streaming output, calling a callback for each line

@@ -7,6 +7,7 @@ import domain/subscription_types.{
   type PollResult, type SubscriptionConfig, type SubscriptionStatus, PollResult,
   SubscriptionConfig, SubscriptionStatus,
 }
+import engine/takeout
 import engine/ytdl_sub
 import envoy
 import gleam/erlang/process.{type Subject}
@@ -231,7 +232,8 @@ fn run_pull_worker(self: Subject(SubscriptionMessage)) -> Nil {
 
   let outcome = case ytdl_sub.ensure_layout(layout) {
     Error(err) -> Error("layout: " <> err)
-    Ok(_) ->
+    Ok(_) -> {
+      takeout.import_and_log(layout)
       case ytdl_sub.read_channels(layout.channels_file) {
         Error(err) -> Error("channels: " <> err)
         Ok([]) -> Error("no channels configured in " <> layout.channels_file)
@@ -241,6 +243,7 @@ fn run_pull_worker(self: Subject(SubscriptionMessage)) -> Nil {
             Ok(_) -> ytdl_sub.run_pull(layout, pull_timeout_ms())
           }
       }
+    }
   }
 
   process.send(self, PollFinished(outcome))
@@ -305,7 +308,7 @@ fn log_poll_start() -> Nil {
   io.println("[" <> timestamp <> "] [SUBSCRIPTION] POLL_START")
 }
 
-fn log_poll_end(found: Int, new: Int, queued: Int, skipped: Int) -> Nil {
+fn log_poll_end(found: Int, new: Int, queued: Int, errors: Int) -> Nil {
   let timestamp = format_timestamp(get_timestamp())
   io.println(
     "["
@@ -316,8 +319,8 @@ fn log_poll_end(found: Int, new: Int, queued: Int, skipped: Int) -> Nil {
     <> int.to_string(new)
     <> " queued="
     <> int.to_string(queued)
-    <> " skipped="
-    <> int.to_string(skipped),
+    <> " errors="
+    <> int.to_string(errors),
   )
 }
 

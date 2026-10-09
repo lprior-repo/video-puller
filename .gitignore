@@ -29,6 +29,10 @@ Thumbs.db
 # ytdl-sub engine lock files
 /.ytdl-sub-lock/
 
+# Runtime data (local database and download output)
+/data/
+/downloads/
+
 # Beads local store
 .beads/embeddeddolt/
 .beads/backup/

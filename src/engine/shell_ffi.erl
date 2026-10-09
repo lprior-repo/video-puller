@@ -1,6 +1,6 @@
 -module(shell_ffi).
 
--export([open_streaming_port/2, read_line/1, read_line_timeout/2, close_port/1, is_port_alive/1]).
+-export([open_streaming_port/2, read_line/1, read_line_timeout/2, close_port/1]).
 
 %% Open a port for streaming command output
 %% Returns {ok, Port} or {error, Reason}
@@ -46,7 +46,6 @@ do_open_port(ExecutableChars, Args) ->
     end.
 
 %% Build environment with Node in PATH for yt-dlp JS interpreter
-%% Also sets XDG_CURRENT_DESKTOP for proper keyring access on Wayland compositors
 build_env_with_node_path() ->
     CurrentPath = os:getenv("PATH", "/usr/bin:/bin"),
     Home = os:getenv("HOME", ""),
@@ -65,9 +64,7 @@ build_env_with_node_path() ->
     %% Filter out empty paths and combine
     ValidNodePaths = [P || P <- NodePaths, P =/= "", P =/= "/bin"],
     NewPath = string:join([CurrentPath | ValidNodePaths], ":"),
-    %% Set XDG_CURRENT_DESKTOP=GNOME to ensure yt-dlp uses GNOME keyring
-    %% for cookie decryption on Wayland compositors like Hyprland/Sway
-    [{"PATH", NewPath}, {"XDG_CURRENT_DESKTOP", "GNOME"}].
+    [{"PATH", NewPath}].
 
 %% Read a line from the port (no timeout version for stream_loop)
 %% Returns Gleam StreamLine type directly (not wrapped in Result):
@@ -117,13 +114,4 @@ close_port(Port) ->
     catch
         _:_ ->
             ok
-    end.
-
-%% Check if port is still alive
-is_port_alive(Port) ->
-    try
-        erlang:port_info(Port) =/= undefined
-    catch
-        _:_ ->
-            false
     end.

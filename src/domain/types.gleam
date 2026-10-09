@@ -10,12 +10,6 @@ import gleam/erlang/process.{type Subject}
 pub type JobId =
   core_types.JobId
 
-pub type FormatOption =
-  core_types.FormatOption
-
-pub type VideoMetadata =
-  core_types.VideoMetadata
-
 pub type VideoStatus =
   core_types.VideoStatus
 

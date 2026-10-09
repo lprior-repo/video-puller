@@ -184,38 +184,6 @@ pub fn generate_nfo_from_info_json(
   }
 }
 
-/// Generate NFO files for all .info.json files in a directory
-/// Returns a tuple of (created_count, skipped_count, errors)
-pub fn generate_nfos_for_directory(
-  directory: String,
-) -> #(Int, Int, List(String)) {
-  case simplifile.read_directory(directory) {
-    Ok(files) -> {
-      let info_json_files =
-        files
-        |> list.filter(fn(f) { string.ends_with(f, ".info.json") })
-
-      list.fold(info_json_files, #(0, 0, []), fn(acc, filename) {
-        let #(created, skipped, errors) = acc
-        let info_json_path = directory <> "/" <> filename
-        let nfo_path = info_json_to_nfo_path(info_json_path)
-
-        // Skip if .nfo already exists
-        case simplifile.is_file(nfo_path) {
-          Ok(True) -> #(created, skipped + 1, errors)
-          _ -> {
-            case generate_nfo_from_info_json(info_json_path) {
-              Ok(_) -> #(created + 1, skipped, errors)
-              Error(msg) -> #(created, skipped, [msg, ..errors])
-            }
-          }
-        }
-      })
-    }
-    Error(_) -> #(0, 0, ["Failed to read directory: " <> directory])
-  }
-}
-
 /// Convert .info.json path to .nfo path
 fn info_json_to_nfo_path(path: String) -> String {
   case string.ends_with(path, ".info.json") {

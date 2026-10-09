@@ -1,11 +1,8 @@
 /// FractalVideoEater - BEAM-Optimized Video Download System
 ///
 /// Main entry point for the application. Implements a proper BEAM architecture:
-/// - Hierarchical supervision tree for fault tolerance
 /// - Worker pool for massive parallel downloads
 /// - BEAM-native scheduling (no infinite recursion)
-/// - Circuit breaker for cascade failure prevention
-/// - Exponential backoff retries
 import core/manager
 import core/startup
 import core/subscription_manager
@@ -14,9 +11,7 @@ import envoy
 import gleam/erlang/process
 import gleam/int
 import gleam/io
-import gleam/list
 import gleam/option.{None, Some}
-import gleam/result
 import gleam/string
 import infra/subscription_repo
 import web/server
@@ -31,8 +26,6 @@ pub fn main() -> Nil {
   io.println("🔧 BEAM Features Enabled:")
   io.println("   ✓ Supervised worker pool for parallel downloads")
   io.println("   ✓ Native timer scheduling (no recursion)")
-  io.println("   ✓ Circuit breaker protection")
-  io.println("   ✓ Exponential backoff retries")
   io.println("   ✓ Dynamic worker scaling")
   io.println("")
 
@@ -47,12 +40,6 @@ pub fn main() -> Nil {
       io.println("📊 Configuration:")
       io.println("   Poll interval: " <> int.to_string(poll_interval) <> "ms")
       io.println("   Max concurrency: " <> int.to_string(max_concurrency))
-      io.println(
-        "   Min workers: " <> int.to_string(int.max(5, max_concurrency / 2)),
-      )
-      io.println(
-        "   Max workers: " <> int.to_string(int.max(50, max_concurrency * 5)),
-      )
       io.println("")
 
       // Start the manager actor (now includes worker pool and scheduling)
@@ -184,76 +171,5 @@ fn get_env_int(key: String, default: Int) -> Int {
         Error(_) -> default
       }
     Error(_) -> default
-  }
-}
-
-/// Validates a URL string
-///
-/// ## Examples
-///
-/// ```gleam
-/// validate_url("https://example.com")
-/// // -> Ok("https://example.com")
-///
-/// validate_url("")
-/// // -> Error("URL cannot be empty")
-/// ```
-pub fn validate_url(url: String) -> Result(String, String) {
-  case string.is_empty(url) {
-    True -> Error("URL cannot be empty")
-    False ->
-      case
-        string.starts_with(url, "http://")
-        || string.starts_with(url, "https://")
-      {
-        True -> Ok(url)
-        False -> Error("URL must start with http:// or https://")
-      }
-  }
-}
-
-/// Extracts the domain from a URL
-///
-/// ## Examples
-///
-/// ```gleam
-/// extract_domain("https://example.com/path")
-/// // -> Ok("example.com")
-/// ```
-pub fn extract_domain(url: String) -> Result(String, String) {
-  use validated_url <- result.try(validate_url(url))
-
-  let without_protocol = case string.starts_with(validated_url, "https://") {
-    True -> string.drop_start(validated_url, 8)
-    False -> string.drop_start(validated_url, 7)
-  }
-
-  case string.split(without_protocol, "/") {
-    [domain, ..] -> Ok(domain)
-    [] -> Error("Could not extract domain")
-  }
-}
-
-/// Filters a list of URLs to only include valid ones
-pub fn filter_valid_urls(urls: List(String)) -> List(String) {
-  urls
-  |> list.filter_map(validate_url)
-}
-
-/// Safely gets an element from a list at the given index
-pub fn safe_get(items: List(a), index: Int) -> Result(a, String) {
-  case index < 0 || index >= list.length(items) {
-    True -> Error("Index out of bounds")
-    False -> {
-      let item =
-        items
-        |> list.drop(index)
-        |> list.first()
-
-      case item {
-        Ok(value) -> Ok(value)
-        Error(_) -> Error("Index out of bounds")
-      }
-    }
   }
 }

@@ -157,30 +157,6 @@ fn build_audio_args(audio_format: AudioFormat) -> List(String) {
   }
 }
 
-/// Build yt-dlp command to get video info without downloading
-pub fn build_info_args(url: String) -> Result(List(String), String) {
-  use _ <- result.try(validate_url(url))
-
-  Ok(
-    list.flatten([
-      youtube_js_args(),
-      ["--dump-json", "--no-playlist", url],
-    ]),
-  )
-}
-
-/// Build yt-dlp command to list available formats for a video
-pub fn build_list_formats_args(url: String) -> Result(List(String), String) {
-  use _ <- result.try(validate_url(url))
-
-  Ok(
-    list.flatten([
-      youtube_js_args(),
-      ["-F", url],
-    ]),
-  )
-}
-
 /// Validate that a URL is safe and well-formed
 fn validate_url(url: String) -> Result(Nil, String) {
   // Check for empty URL
@@ -222,37 +198,6 @@ pub fn default_config() -> DownloadConfig {
     bandwidth_limit: "",
     // Channel folders disabled by default for backwards compatibility
     use_channel_folders: False,
-  )
-}
-
-/// Create audio-only download configuration
-pub fn audio_config(_format: AudioFormat) -> DownloadConfig {
-  DownloadConfig(
-    output_directory: "./downloads",
-    format: "bestaudio",
-    max_filesize: "500M",
-    audio_only: True,
-    audio_format: BestAudio,
-    allow_playlist: False,
-    // Default to 30 minute timeout
-    download_timeout_ms: 1_800_000,
-    // Rate limiting defaults for massive downloads
-    rate_limit_delay_ms: 500,
-    bandwidth_limit: "",
-    // Channel folders disabled by default
-    use_channel_folders: False,
-  )
-}
-
-/// Build yt-dlp command to get playlist info without downloading
-pub fn build_playlist_info_args(url: String) -> Result(List(String), String) {
-  use _ <- result.try(validate_url(url))
-
-  Ok(
-    list.flatten([
-      youtube_js_args(),
-      ["--dump-json", "--flat-playlist", "--yes-playlist", url],
-    ]),
   )
 }
 

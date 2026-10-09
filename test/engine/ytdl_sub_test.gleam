@@ -217,3 +217,84 @@ pub fn parse_episode_date_rejects_bad_season_test() {
   ytdl_sub.parse_episode_date("short")
   |> should.equal(None)
 }
+
+// =============================================================================
+// Generated subscriptions file: throttle-protection overrides
+// =============================================================================
+
+pub fn write_subscriptions_disables_resolution_assert_test() {
+  let root = "/tmp/test_ytdl_sub_assert"
+  let layout = ytdl_sub.layout(root)
+
+  let _ = simplifile.create_directory_all(root <> "/ytdl-sub")
+
+  ytdl_sub.write_subscriptions(layout, ["https://www.youtube.com/@Fireship"])
+  |> should.be_ok()
+
+  let content = simplifile.read(layout.subscriptions_file) |> should.be_ok()
+
+  // The engine's resolution assert aborts a subscription whenever it touches
+  // a genuinely low-res upload (below 361p), which is not throttling
+  content
+  |> string.contains("enable_resolution_assert: False")
+  |> should.be_true()
+
+  let _ = simplifile.delete(layout.subscriptions_file)
+  let _ = simplifile.delete(root <> "/ytdl-sub")
+  let _ = simplifile.delete(root)
+}
+
+// =============================================================================
+// Run outcome interpretation
+// =============================================================================
+
+/// Fixture: one subscription downloaded, one failed, engine exit code 1
+const partial_failure_output =
+  "[ytdl-sub] Transaction log for Good Channel:
+Files created:
+----------------------------------------
+/var/library/Good Channel/Season 2026
+  s2026.e033101 - Video One.mp4
+[ytdl-sub] Download Summary:
+Good Channel +1 0 0     1 ✔
+Bad Channel  0 0 0     0 ERROR: [youtube] abc: Video unavailable
+Total: 2      +1 0 0     1 Error
+"
+
+pub fn interpret_run_result_accepts_success_test() {
+  let output =
+    "Files created:
+----------------------------------------
+/var/library/Channel One
+  Video One.mp4
+"
+
+  let summary = ytdl_sub.interpret_run_result(0, output) |> should.be_ok()
+
+  summary.downloaded |> should.equal(1)
+  summary.errors |> should.equal([])
+}
+
+/// A non-zero exit keeps the downloads that did land, with failures reported
+pub fn interpret_run_result_keeps_downloads_on_partial_failure_test() {
+  let summary =
+    ytdl_sub.interpret_run_result(1, partial_failure_output) |> should.be_ok()
+
+  summary.downloaded |> should.equal(1)
+  summary.added_files
+  |> should.equal([
+    "/var/library/Good Channel/Season 2026/s2026.e033101 - Video One.mp4",
+  ])
+  list.length(summary.errors) |> should.equal(1)
+}
+
+pub fn interpret_run_result_fails_when_nothing_downloaded_test() {
+  let message =
+    ytdl_sub.interpret_run_result(
+      1,
+      "[ytdl-sub:yt-dlp] ERROR: [youtube] abc: Video unavailable\n",
+    )
+    |> should.be_error()
+
+  string.contains(message, "exit code 1") |> should.be_true()
+}
