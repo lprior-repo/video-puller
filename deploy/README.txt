@@ -46,6 +46,8 @@ no root and can use a user-installed toolchain (mise shims provide `erl` and
      WorkingDirectory=%h/src/video-puller
      Environment=PATH=%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
      Environment=DATA_DIR=%h/.local/share/video-puller
+     Environment=DB_PATH=%h/.local/share/video-puller/video_eater.db
+     Environment=STATIC_DIR=%h/src/video-puller/priv/static
      Environment=CHANNELS_TEMPLATE=%h/src/video-puller/priv/ytdl-sub/channels.txt
      Environment=POLL_TIMEOUT_MINUTES=240
      Environment=PORT=8080
