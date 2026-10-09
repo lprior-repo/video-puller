@@ -24,6 +24,53 @@ Quick Start:
 4. View logs:
    sudo journalctl -u video-puller -f
 
+User-Level Install (no root, single user):
+------------------------------------------
+On a workstation the same release runs from a systemd user unit, which needs
+no root and can use a user-installed toolchain (mise shims provide `erl` and
+`ytdl-sub` on PATH):
+
+1. Build the release in the checkout:
+     gleam export erlang-shipment
+
+2. Install the unit, adjusting the paths for your checkout:
+     mkdir -p ~/.config/systemd/user
+     cat > ~/.config/systemd/user/video-puller.service <<'EOF'
+     [Unit]
+     Description=video-puller (YouTube subscription downloads, no cookies)
+     After=network-online.target
+     Wants=network-online.target
+
+     [Service]
+     Type=simple
+     WorkingDirectory=%h/src/video-puller
+     Environment=PATH=%h/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin
+     Environment=DATA_DIR=%h/.local/share/video-puller
+     Environment=CHANNELS_TEMPLATE=%h/src/video-puller/priv/ytdl-sub/channels.txt
+     Environment=POLL_TIMEOUT_MINUTES=240
+     Environment=PORT=8080
+     ExecStart=%h/src/video-puller/build/erlang-shipment/entrypoint.sh run
+     Restart=on-failure
+     RestartSec=15
+
+     [Install]
+     WantedBy=default.target
+     EOF
+
+3. Enable it, and let it run without an active login:
+     systemctl --user daemon-reload
+     systemctl --user enable --now video-puller
+     loginctl enable-linger "$USER"
+
+4. Status and logs:
+     systemctl --user status video-puller
+     journalctl --user -u video-puller -f
+
+The data directory is ~/.local/share/video-puller, with the same layout as
+below (library/ in place of /var/lib/video-puller/library). A home directory
+of mode 700 is not readable by Plex under another account: point DATA_DIR at a
+shared path, or use the system install, when Plex must read the library.
+
 Runtime Dependencies:
 ---------------------
 Install these before starting; the unit runs with PATH=/usr/local/bin:/usr/bin
