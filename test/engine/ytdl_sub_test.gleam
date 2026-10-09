@@ -4,6 +4,7 @@
 /// file shape, the channel label, transaction-log parsing and the library
 /// path mapping.
 import engine/ytdl_sub
+import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
@@ -37,6 +38,50 @@ pub fn subscription_label_handles_channel_urls_test() {
   |> should.equal("UCabc123")
 }
 
+pub fn canonical_channel_urls_collapse_tabs_test() {
+  ytdl_sub.canonical_channel_url(
+    "https://www.youtube.com/@Fireship/videos?view=0#latest",
+  )
+  |> should.equal("https://www.youtube.com/@Fireship")
+
+  ytdl_sub.canonical_channel_url("https://www.youtube.com/@Fireship/shorts/")
+  |> should.equal("https://www.youtube.com/@Fireship")
+}
+
+pub fn parse_channel_line_accepts_labels_and_comments_test() {
+  ytdl_sub.parse_channel_line(
+    "Fireship = https://www.youtube.com/@Fireship/videos",
+  )
+  |> should.equal(
+    Some(ytdl_sub.Channel(Some("Fireship"), "https://www.youtube.com/@Fireship")),
+  )
+
+  ytdl_sub.parse_channel_line("# ignored") |> should.equal(None)
+  ytdl_sub.parse_channel_line("not a URL") |> should.equal(None)
+}
+
+pub fn dedupe_channels_prefers_existing_library_label_test() {
+  let root = "/tmp/test_ytdl_sub_dedupe"
+  let _ = simplifile.create_directory_all(root <> "/library/Existing Name")
+  let channels = [
+    ytdl_sub.Channel(Some("Existing Name"), "https://www.youtube.com/@alias"),
+    ytdl_sub.Channel(Some("New Name"), "https://www.youtube.com/channel/UCsame"),
+  ]
+  let ids =
+    dict.from_list([
+      #("https://www.youtube.com/@alias", "UCsame"),
+    ])
+
+  ytdl_sub.dedupe_channels(channels, ids, root <> "/library")
+  |> should.equal([
+    ytdl_sub.Channel(Some("Existing Name"), "https://www.youtube.com/@alias"),
+  ])
+
+  let _ = simplifile.delete(root <> "/library/Existing Name")
+  let _ = simplifile.delete(root <> "/library")
+  let _ = simplifile.delete(root)
+}
+
 // =============================================================================
 // Generated subscriptions file
 // =============================================================================
@@ -46,10 +91,16 @@ pub fn write_subscriptions_uses_supported_presets_test() {
   let layout = ytdl_sub.layout(root)
 
   let _ = simplifile.create_directory_all(root <> "/ytdl-sub")
+  let _ =
+    simplifile.write(
+      layout.channel_ids_file,
+      "https://www.youtube.com/@Fireship\tUCfireship\tFireship\n"
+        <> "https://www.youtube.com/@Computerphile\tUCcomputerphile\tComputerphile\n",
+    )
 
   ytdl_sub.write_subscriptions(layout, [
-    "https://www.youtube.com/@Fireship",
-    "https://www.youtube.com/@Computerphile",
+    ytdl_sub.Channel(None, "https://www.youtube.com/@Fireship"),
+    ytdl_sub.Channel(None, "https://www.youtube.com/@Computerphile"),
   ])
   |> should.be_ok()
 
@@ -227,8 +278,15 @@ pub fn write_subscriptions_disables_resolution_assert_test() {
   let layout = ytdl_sub.layout(root)
 
   let _ = simplifile.create_directory_all(root <> "/ytdl-sub")
+  let _ =
+    simplifile.write(
+      layout.channel_ids_file,
+      "https://www.youtube.com/@Fireship\tUCfireship\tFireship\n",
+    )
 
-  ytdl_sub.write_subscriptions(layout, ["https://www.youtube.com/@Fireship"])
+  ytdl_sub.write_subscriptions(layout, [
+    ytdl_sub.Channel(None, "https://www.youtube.com/@Fireship"),
+  ])
   |> should.be_ok()
 
   let content = simplifile.read(layout.subscriptions_file) |> should.be_ok()
@@ -297,4 +355,114 @@ pub fn interpret_run_result_fails_when_nothing_downloaded_test() {
     |> should.be_error()
 
   string.contains(message, "exit code 1") |> should.be_true()
+}
+
+/// A non-zero exit with no recognizable error text still surfaces an error
+pub fn interpret_run_result_reports_nonzero_exit_without_error_text_test() {
+  let summary =
+    ytdl_sub.interpret_run_result(2, real_transaction_log) |> should.be_ok()
+
+  summary.downloaded |> should.equal(2)
+  list.length(summary.errors) |> should.equal(1)
+}
+
+/// Media listed under "Files modified:" / "Files removed:" is not a download
+pub fn parse_pull_output_stops_at_other_sections_test() {
+  let output =
+    "Files created:
+/var/library/Channel One/Season 2026
+  s2026.e010101 - New Video.mp4
+
+Files modified:
+/var/library/Channel One/Season 2026
+  s2026.e010101 - New Video.mp4
+
+Files removed:
+/var/library/Channel One/Season 2026
+  s2026.e020202 - Old Video.mp4
+"
+
+  let summary = ytdl_sub.parse_pull_output(output)
+
+  summary.added_files
+  |> should.equal([
+    "/var/library/Channel One/Season 2026/s2026.e010101 - New Video.mp4",
+  ])
+}
+
+/// A relative data root is resolved so the engine reports absolute paths
+pub fn layout_resolves_relative_root_test() {
+  let layout = ytdl_sub.layout("./data")
+
+  string.starts_with(layout.library_dir, "/") |> should.be_true()
+  string.ends_with(layout.library_dir, "/data/library") |> should.be_true()
+}
+
+// =============================================================================
+// Channel identity lookups
+
+/// yt-dlp prints one field per line; empty output means the lookup failed
+pub fn parse_lookup_output_reads_id_and_title_test() {
+  ytdl_sub.parse_lookup_output("UCxyz\nFireship\n")
+  |> should.equal(Some(#("UCxyz", Some("Fireship"))))
+
+  ytdl_sub.parse_lookup_output("UCxyz\n\n")
+  |> should.equal(Some(#("UCxyz", None)))
+
+  ytdl_sub.parse_lookup_output("")
+  |> should.equal(None)
+}
+
+/// A query that selects the content is part of the URL, not decoration
+pub fn canonical_channel_url_keeps_content_query_test() {
+  ytdl_sub.canonical_channel_url(
+    "https://www.youtube.com/watch?v=jNQXAC9IVRw&t=1s",
+  )
+  |> should.equal("https://www.youtube.com/watch?v=jNQXAC9IVRw&t=1s")
+
+  ytdl_sub.canonical_channel_url("https://www.youtube.com/playlist?list=PL123")
+  |> should.equal("https://www.youtube.com/playlist?list=PL123")
+
+  ytdl_sub.canonical_channel_url(
+    "https://www.youtube.com/@Fireship/videos?view=0#tabs",
+  )
+  |> should.equal("https://www.youtube.com/@Fireship")
+}
+
+// =============================================================================
+// Record identity
+
+/// The sidecar carries the stable YouTube identity for a downloaded file
+pub fn to_discovered_video_uses_sidecar_identity_test() {
+  let dir = "/tmp/test_vp_sidecar"
+  let season_dir = dir <> "/Channel One/Season 2026"
+  let media = season_dir <> "/s2026.e091101 - Video One.mp4"
+  let _ = simplifile.create_directory_all(season_dir)
+  let _ =
+    simplifile.write(
+      season_dir <> "/s2026.e091101 - Video One.info.json",
+      "{\"id\": \"abc123\", \"channel_id\": \"UCxyz\"}",
+    )
+
+  let video = ytdl_sub.to_discovered_video(dir, media)
+
+  video.video_id |> should.equal("abc123")
+  video.channel_id |> should.equal(Some("UCxyz"))
+  video.title |> should.equal("Video One")
+}
+
+/// Without a usable sidecar the library-relative path identifies the record
+pub fn to_discovered_video_falls_back_to_path_identity_test() {
+  let dir = "/tmp/test_vp_sidecar_missing"
+  let season_dir = dir <> "/Channel One/Season 2026"
+  let media = season_dir <> "/s2026.e091101 - Video Two.mp4"
+  let _ = simplifile.create_directory_all(season_dir)
+  let _ =
+    simplifile.write(season_dir <> "/s2026.e091101 - Video Two.info.json", "{}")
+
+  let video = ytdl_sub.to_discovered_video(dir, media)
+
+  video.video_id
+  |> should.equal("Channel One/Season 2026/s2026.e091101 - Video Two.mp4")
+  video.channel_id |> should.equal(None)
 }

@@ -21,7 +21,7 @@ pub type ImportSummary {
 
 /// Import the Takeout export when one is waiting beside channels.txt
 ///
-/// Returns None when no export file exists; otherwise merges the URLs that
+/// Returns None when no export file exists; otherwise merges the channels that
 /// are not already listed and renames the export so it is imported once.
 pub fn import_if_present(
   layout: ytdl_sub.Layout,
@@ -54,18 +54,18 @@ fn import_export(
   layout: ytdl_sub.Layout,
 ) -> Result(Option(ImportSummary), String) {
   use content <- result.try(read_file(layout.takeout_file))
-  use urls <- result.try(case parse_subscription_urls(content) {
+  use channels <- result.try(case parse_subscription_channels(content) {
     [] ->
       Error(
         "no channel URLs found in "
         <> layout.takeout_file
         <> " (expected a YouTube Takeout subscriptions.csv)",
       )
-    urls -> Ok(urls)
+    channels -> Ok(channels)
   })
   use existing <- result.try(read_file(layout.channels_file))
 
-  let #(updated, added) = merge_channels(existing, urls)
+  let #(updated, added) = merge_channels(existing, channels)
   use _ <- result.try(case added {
     0 -> Ok(Nil)
     _ -> write_file(layout.channels_file, updated)
@@ -77,58 +77,64 @@ fn import_export(
     }),
   )
 
-  Ok(Some(ImportSummary(added: added, found: list.length(urls))))
+  Ok(Some(ImportSummary(added: added, found: list.length(channels))))
 }
 
-/// Extract the channel URLs from a Takeout subscriptions.csv
-///
-/// Handles both the current `Channel Id,Channel Url,Channel Title` layout and
-/// legacy column orders: any cell containing a URL is taken, so the header row
-/// and title columns (which may hold commas inside quotes) are ignored.
-pub fn parse_subscription_urls(content: String) -> List(String) {
+/// A parsed Takeout row, retaining the title when it is available.
+pub fn parse_subscription_channels(content: String) -> List(ytdl_sub.Channel) {
   content
-  |> string.split("\n")
+  |> csv_rows
   |> list.filter_map(fn(row) {
-    row
-    |> string.split(",")
-    |> list.find(fn(cell) { is_url(clean_cell(cell)) })
-    |> result.map(clean_cell)
+    case parse_channel_row(row) {
+      Some(channel) -> Ok(channel)
+      None -> Error(Nil)
+    }
   })
+}
+
+/// Extract channel URLs from a Takeout subscriptions.csv.
+///
+/// Kept as a compatibility API for callers that only need URLs.
+pub fn parse_subscription_urls(content: String) -> List(String) {
+  parse_subscription_channels(content)
+  |> list.map(fn(channel) { channel.url })
   |> dedupe
 }
 
-/// Merge imported URLs into the channel list content
+/// Merge imported channels into the channel list content.
 ///
-/// Existing lines (comments included) are preserved; imported URLs that are
-/// not already listed are appended. Returns the new content and the number of
-/// appended lines.
+/// Existing lines (comments included) are preserved; imported channels that
+/// are not already listed are appended as `Title = URL` where a title exists.
 pub fn merge_channels(
   existing_content: String,
-  imported: List(String),
+  imported: List(ytdl_sub.Channel),
 ) -> #(String, Int) {
   let known =
     existing_content
     |> string.split("\n")
-    |> list.map(string.trim)
-    |> list.filter(fn(line) {
-      !string.is_empty(line) && !string.starts_with(line, "#")
+    |> list.filter_map(fn(line) {
+      case ytdl_sub.parse_channel_line(line) {
+        Some(channel) -> Ok(ytdl_sub.canonical_channel_url(channel.url))
+        None -> Error(Nil)
+      }
     })
-    |> list.map(channel_key)
     |> dedupe
 
-  let #(new_urls, _) =
-    list.fold(imported, #([], known), fn(acc, url) {
-      let #(new_urls, seen) = acc
-      let key = channel_key(url)
-      case list.contains(seen, key) {
+  let #(new_channels, _) =
+    list.fold(imported, #([], known), fn(acc, channel) {
+      let #(new_channels, seen) = acc
+      let url = ytdl_sub.canonical_channel_url(channel.url)
+      case list.contains(seen, url) {
         True -> acc
-        False -> #([url, ..new_urls], [key, ..seen])
+        False -> #([ytdl_sub.Channel(channel.label, url), ..new_channels], [
+          url,
+          ..seen
+        ])
       }
     })
 
-  let new_urls = new_urls |> list.reverse |> dedupe
-
-  case new_urls {
+  let new_channels = list.reverse(new_channels)
+  case new_channels {
     [] -> #(existing_content, 0)
     _ -> {
       let base = case string.is_empty(existing_content) {
@@ -139,25 +145,121 @@ pub fn merge_channels(
             False -> existing_content <> "\n"
           }
       }
-      #(base <> string.join(new_urls, "\n") <> "\n", list.length(new_urls))
+      let lines =
+        list.map(new_channels, fn(channel) {
+          case channel.label {
+            Some(title) -> title <> " = " <> channel.url
+            None -> channel.url
+          }
+        })
+      #(base <> string.join(lines, "\n") <> "\n", list.length(new_channels))
     }
   }
 }
 
-fn clean_cell(cell: String) -> String {
-  cell |> string.trim |> string.replace("\"", "") |> string.trim
+type CsvState {
+  CsvState(
+    rows: List(List(String)),
+    row: List(String),
+    field: List(String),
+    quoted: Bool,
+  )
+}
+
+fn csv_rows(content: String) -> List(List(String)) {
+  let state =
+    csv_scan(string.to_graphemes(content), CsvState([], [], [], False))
+  let state = finish_csv_row(state)
+  list.reverse(state.rows)
+}
+
+fn csv_scan(chars: List(String), state: CsvState) -> CsvState {
+  case chars {
+    [] -> state
+    [char, ..rest] ->
+      case state.quoted, char, rest {
+        True, "\"", ["\"", ..tail] ->
+          csv_scan(
+            tail,
+            CsvState(state.rows, state.row, ["\"", ..state.field], True),
+          )
+        True, "\"", _ ->
+          csv_scan(rest, CsvState(state.rows, state.row, state.field, False))
+        False, "\"", _ ->
+          csv_scan(rest, CsvState(state.rows, state.row, state.field, True))
+        False, ",", _ ->
+          csv_scan(
+            rest,
+            CsvState(
+              state.rows,
+              [finish_field(state.field), ..state.row],
+              [],
+              False,
+            ),
+          )
+        False, "\n", _ -> csv_scan(rest, finish_csv_row(state))
+        False, "\r", _ -> csv_scan(rest, state)
+        _, _, _ ->
+          csv_scan(
+            rest,
+            CsvState(state.rows, state.row, [char, ..state.field], state.quoted),
+          )
+      }
+  }
+}
+
+fn finish_field(field: List(String)) -> String {
+  field |> list.reverse |> string.join("") |> string.trim
+}
+
+fn finish_csv_row(state: CsvState) -> CsvState {
+  case state.field, state.row {
+    [], [] -> state
+    _, _ ->
+      CsvState(
+        [list.reverse([finish_field(state.field), ..state.row]), ..state.rows],
+        [],
+        [],
+        False,
+      )
+  }
+}
+
+fn parse_channel_row(row: List(String)) -> Option(ytdl_sub.Channel) {
+  case find_url(row, 0) {
+    Some(#(url, index)) -> {
+      let title = case list.drop(row, index + 1) {
+        [candidate, ..] ->
+          case is_url(candidate), string.is_empty(candidate) {
+            True, _ -> None
+            False, True -> None
+            False, False -> Some(candidate)
+          }
+        [] -> None
+      }
+      Some(ytdl_sub.Channel(title, ytdl_sub.canonical_channel_url(url)))
+    }
+    None -> None
+  }
+}
+
+fn find_url(cells: List(String), index: Int) -> Option(#(String, Int)) {
+  case cells {
+    [] -> None
+    [cell, ..rest] ->
+      case is_channel_url(cell) {
+        True -> Some(#(cell, index))
+        False -> find_url(rest, index + 1)
+      }
+  }
 }
 
 fn is_url(value: String) -> Bool {
   string.starts_with(value, "http://") || string.starts_with(value, "https://")
 }
 
-fn channel_key(url: String) -> String {
-  let trimmed = string.trim(url)
-  case string.ends_with(trimmed, "/") {
-    True -> string.drop_end(trimmed, 1)
-    False -> trimmed
-  }
+fn is_channel_url(value: String) -> Bool {
+  is_url(value) && string.contains(value, "youtube.com/")
 }
 
 fn dedupe(items: List(String)) -> List(String) {

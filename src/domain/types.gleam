@@ -5,6 +5,7 @@
 import core/pool_types.{type WorkerPoolSubject}
 import domain/core_types
 import gleam/erlang/process.{type Subject}
+import gleam/option.{type Option}
 
 // Re-export core types for backwards compatibility
 pub type JobId =
@@ -31,7 +32,13 @@ pub type DownloaderConfig =
 /// Manager message for the orchestration layer
 pub type ManagerMessage {
   PollJobs
-  JobStatusUpdate(job_id: core_types.JobId, status: core_types.VideoStatus)
+  // A completed download carries the exact path reported by yt-dlp so the
+  // manager can persist it alongside the terminal status.
+  JobStatusUpdate(
+    job_id: core_types.JobId,
+    status: core_types.VideoStatus,
+    path: Option(String),
+  )
   UpdateProgress(job_id: core_types.JobId, progress: Int)
   Shutdown
   ForceShutdown

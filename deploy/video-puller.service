@@ -15,7 +15,9 @@ WorkingDirectory=/opt/video-puller
 # Environment variables
 Environment="PORT=8080"
 Environment="DB_PATH=/var/lib/video-puller/video_eater.db"
+Environment="DATA_DIR=/var/lib/video-puller"
 Environment="STATIC_DIR=/opt/video-puller/priv/static"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 # Optionally set a fixed SECRET_KEY for session persistence across restarts
 # Environment="SECRET_KEY=your-secret-key-here"
 

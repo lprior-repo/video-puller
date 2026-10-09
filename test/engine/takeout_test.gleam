@@ -1,6 +1,7 @@
 /// Tests for the Google Takeout subscription import
 import engine/takeout
 import engine/ytdl_sub
+import gleam/option.{None, Some}
 import gleam/string
 import gleeunit
 import gleeunit/should
@@ -25,6 +26,17 @@ pub fn parse_takeout_urls_test() {
   ])
 }
 
+pub fn parse_takeout_preserves_quoted_title_test() {
+  takeout.parse_subscription_channels(takeout_csv)
+  |> should.equal([
+    ytdl_sub.Channel(
+      Some("Channel One"),
+      "http://www.youtube.com/channel/UCabc123",
+    ),
+    ytdl_sub.Channel(Some("Two, with comma"), "https://www.youtube.com/@Two"),
+  ])
+}
+
 pub fn parse_takeout_handles_legacy_order_and_blanks_test() {
   let content =
     "\"UCaaa\",\"Channel A\",\"https://www.youtube.com/channel/UCaaa\"\n\n\"UCbbb\",\"Channel B\",\"https://www.youtube.com/@B\"\r\n"
@@ -33,6 +45,15 @@ pub fn parse_takeout_handles_legacy_order_and_blanks_test() {
   |> should.equal([
     "https://www.youtube.com/channel/UCaaa",
     "https://www.youtube.com/@B",
+  ])
+}
+
+pub fn parse_takeout_handles_comma_before_url_test() {
+  takeout.parse_subscription_channels(
+    "\"a,b\",https://www.youtube.com/@Comma,Comma Channel\n",
+  )
+  |> should.equal([
+    ytdl_sub.Channel(Some("Comma Channel"), "https://www.youtube.com/@Comma"),
   ])
 }
 
@@ -48,9 +69,9 @@ pub fn merge_channels_appends_only_missing_test() {
 
   let #(content, added) =
     takeout.merge_channels(existing, [
-      "https://www.youtube.com/@One/",
-      "https://www.youtube.com/@Two",
-      "https://www.youtube.com/@Two",
+      ytdl_sub.Channel(None, "https://www.youtube.com/@One/"),
+      ytdl_sub.Channel(None, "https://www.youtube.com/@Two"),
+      ytdl_sub.Channel(None, "https://www.youtube.com/@Two"),
     ])
 
   added |> should.equal(1)
@@ -64,8 +85,9 @@ pub fn merge_channels_noop_without_new_urls_test() {
   let existing = "https://www.youtube.com/@One\n"
 
   let #(content, added) =
-    takeout.merge_channels(existing, ["https://www.youtube.com/@One"])
-
+    takeout.merge_channels(existing, [
+      ytdl_sub.Channel(None, "https://www.youtube.com/@One"),
+    ])
   added |> should.equal(0)
   content |> should.equal(existing)
 }
@@ -88,7 +110,9 @@ pub fn import_if_present_merges_and_marks_csv_test() {
   simplifile.read(layout.channels_file)
   |> should.be_ok()
   |> should.equal(
-    "https://www.youtube.com/@One\nhttp://www.youtube.com/channel/UCabc123\nhttps://www.youtube.com/@Two\n",
+    "https://www.youtube.com/@One\n"
+    <> "Channel One = http://www.youtube.com/channel/UCabc123\n"
+    <> "Two, with comma = https://www.youtube.com/@Two\n",
   )
 
   simplifile.is_file(layout.takeout_file <> ".imported")

@@ -4,6 +4,7 @@
 /// CRITICAL: All inputs must be sanitized to prevent shell injection (INV-001).
 import gleam/erlang/port.{type Port}
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import shellout
@@ -66,10 +67,12 @@ pub fn run_with_timeout(
   case validate_command(command) {
     Error(e) -> Error(e)
     Ok(_) -> {
-      // Use streaming execution with timeout
+      // Use streaming execution with a total deadline: a command that keeps
+      // emitting output must still be killed once the budget is used up
       use stream <- result.try(open_stream(command, args))
+      let deadline = monotonic_milliseconds() + timeout_ms
 
-      case read_with_timeout(stream, timeout_ms, [], []) {
+      case read_with_deadline(stream, deadline, None, False, [], []) {
         Ok(#(exit_code, stdout_lines, stderr_lines)) -> {
           close_stream(stream)
           Ok(ShellResult(
@@ -79,6 +82,9 @@ pub fn run_with_timeout(
           ))
         }
         Error(e) -> {
+          // A timed-out command may ignore the port close and keep running;
+          // kill it so it cannot keep downloading in the background
+          kill_port_tree(stream)
           close_stream(stream)
           Error(e)
         }
@@ -87,39 +93,145 @@ pub fn run_with_timeout(
   }
 }
 
-/// Read from stream with timeout
-fn read_with_timeout(
+/// Read from a stream until it ends or the total deadline passes
+///
+/// The deadline spans the whole command rather than each line: a command that
+/// keeps emitting output cannot extend its own budget by doing so. Erlang
+/// gives no ordering guarantee between EOF and the exit status, so the status
+/// is tracked separately: EOF never fabricates a zero exit.
+fn read_with_deadline(
   stream: StreamingPort,
-  timeout_ms: Int,
+  deadline: Int,
+  exit_code: Option(Int),
+  saw_eof: Bool,
   stdout_acc: List(String),
   stderr_acc: List(String),
 ) -> Result(#(Int, List(String), List(String)), ShellError) {
-  case read_stream_line_with_timeout(stream, timeout_ms) {
-    Ok(OutputLine(line)) -> {
-      // All output goes to stdout (stderr is harder to separate in ports)
-      read_with_timeout(stream, timeout_ms, [line, ..stdout_acc], stderr_acc)
-    }
-    Ok(ProcessExit(code)) -> {
-      // Continue reading to drain remaining output
-      read_with_timeout(stream, timeout_ms, stdout_acc, stderr_acc)
-      |> result.map(fn(res) {
-        let #(_, out, err) = res
-        #(code, out, err)
-      })
-      |> result.or(
-        Ok(#(code, list.reverse(stdout_acc), list.reverse(stderr_acc))),
-      )
-    }
-    Ok(EndOfStream) -> {
-      Ok(#(0, list.reverse(stdout_acc), list.reverse(stderr_acc)))
-    }
-    Ok(StreamError(_)) -> {
-      Ok(#(1, list.reverse(stdout_acc), list.reverse(stderr_acc)))
-    }
-    Error(Timeout) -> {
-      Error(ExecutionError("Command timeout exceeded"))
-    }
+  case remaining_time(deadline) {
+    Error(_) ->
+      case exit_code {
+        Some(code) -> Ok(finish_result(code, stdout_acc, stderr_acc))
+        None -> Error(timeout_error(stdout_acc))
+      }
+    Ok(remaining) ->
+      case read_stream_line_with_timeout(stream, remaining) {
+        Ok(OutputLine(line)) -> {
+          // All output goes to stdout (stderr is harder to separate in ports)
+          read_with_deadline(
+            stream,
+            deadline,
+            exit_code,
+            saw_eof,
+            [line, ..stdout_acc],
+            stderr_acc,
+          )
+        }
+        Ok(ProcessExit(code)) ->
+          case saw_eof {
+            // Output already ended: nothing left to drain
+            True -> Ok(finish_result(code, stdout_acc, stderr_acc))
+            False ->
+              // Continue reading to drain remaining output
+              read_with_deadline(
+                stream,
+                deadline,
+                Some(code),
+                saw_eof,
+                stdout_acc,
+                stderr_acc,
+              )
+              |> result.map(fn(res) {
+                let #(_, out, err) = res
+                #(code, out, err)
+              })
+              |> result.or(Ok(finish_result(code, stdout_acc, stderr_acc)))
+          }
+        Ok(EndOfStream) ->
+          case exit_code {
+            Some(code) -> Ok(finish_result(code, stdout_acc, stderr_acc))
+            // EOF only says the output ended; the exit status may still be
+            // in flight, and the deadline still applies while waiting
+            None ->
+              read_with_deadline(
+                stream,
+                deadline,
+                None,
+                True,
+                stdout_acc,
+                stderr_acc,
+              )
+          }
+        Ok(StreamError(_)) ->
+          case exit_code {
+            Some(code) -> Ok(finish_result(code, stdout_acc, stderr_acc))
+            None -> Ok(finish_result(1, stdout_acc, stderr_acc))
+          }
+        Error(Timeout) ->
+          case exit_code {
+            // The status was already seen; it outranks the deadline
+            Some(code) -> Ok(finish_result(code, stdout_acc, stderr_acc))
+            None -> Error(timeout_error(stdout_acc))
+          }
+      }
   }
+}
+
+fn finish_result(
+  code: Int,
+  stdout_acc: List(String),
+  stderr_acc: List(String),
+) -> #(Int, List(String), List(String)) {
+  #(code, list.reverse(stdout_acc), list.reverse(stderr_acc))
+}
+
+/// Milliseconds left until the deadline, or an error once it has passed
+fn remaining_time(deadline: Int) -> Result(Int, Nil) {
+  let remaining = deadline - monotonic_milliseconds()
+  case remaining <= 0 {
+    True -> Error(Nil)
+    False -> Ok(remaining)
+  }
+}
+
+const timeout_message = "Command timeout exceeded"
+
+const timeout_tail_limit = 200
+
+/// Timeout error carrying the tail of the output
+///
+/// A silent timeout is the hardest failure to diagnose: the caller otherwise
+/// only learns that the command exceeded its deadline.
+fn timeout_error(stdout_acc: List(String)) -> ShellError {
+  ExecutionError(case output_tail(stdout_acc) {
+    "" -> timeout_message
+    tail -> timeout_message <> " (last output: " <> tail <> ")"
+  })
+}
+
+/// The most recent non-empty output lines, oldest first, truncated
+fn output_tail(lines: List(String)) -> String {
+  let tail =
+    lines
+    |> list.reverse
+    |> list.filter(fn(line) { !string.is_empty(string.trim(line)) })
+    |> list.take(2)
+    |> list.reverse
+    |> string.join(" / ")
+  case string.length(tail) > timeout_tail_limit {
+    True -> string.slice(tail, 0, timeout_tail_limit) <> "…"
+    False -> tail
+  }
+}
+
+@external(erlang, "erlang", "monotonic_time")
+fn monotonic_time(unit: MonotonicUnit) -> Int
+
+fn monotonic_milliseconds() -> Int {
+  monotonic_time(Millisecond)
+}
+
+type MonotonicUnit {
+  Millisecond
 }
 
 /// Timeout error for stream reading
@@ -215,6 +327,10 @@ fn do_read_line(port: Port) -> StreamLine
 @external(erlang, "shell_ffi", "close_port")
 fn do_close_port(port: Port) -> Nil
 
+/// Kill the process behind a port and its children
+@external(erlang, "shell_ffi", "kill_port_tree")
+fn do_kill_port_tree(port: Port) -> Nil
+
 /// Open a streaming shell command
 ///
 /// This creates a port that streams output line-by-line as the command runs.
@@ -259,6 +375,14 @@ pub fn read_stream_line(stream: StreamingPort) -> StreamLine {
 /// Close a streaming port and clean up resources
 pub fn close_stream(stream: StreamingPort) -> Nil {
   do_close_port(stream.port)
+}
+
+/// Kill the process behind a stream and its children
+///
+/// Used when a command ignores its deadline (ytdl-sub keeps downloading after
+/// the port is closed, and holds its working-directory lock while it does).
+fn kill_port_tree(stream: StreamingPort) -> Nil {
+  do_kill_port_tree(stream.port)
 }
 
 /// Execute a command with streaming output, calling a callback for each line

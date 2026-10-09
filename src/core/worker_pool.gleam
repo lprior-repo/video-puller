@@ -62,7 +62,12 @@ pub type WorkerInfo {
 
 /// Pending work item
 pub type PendingWork {
-  PendingWork(job_id: JobId, url: String, queued_at: Int)
+  PendingWork(
+    job_id: JobId,
+    url: String,
+    config: ytdlp.DownloadConfig,
+    queued_at: Int,
+  )
 }
 
 // PoolStats, PoolMessage, and PoolStatus are now defined in core/pool_types.gleam
@@ -70,10 +75,11 @@ pub type PendingWork {
 
 /// Messages for individual workers
 pub type WorkerMessage {
-  // Execute a download
+  // Execute a download using the submission's immutable settings snapshot.
   ExecuteDownload(
     job_id: JobId,
     url: String,
+    config: ytdlp.DownloadConfig,
     worker_id: String,
     pool: Subject(PoolMessage),
     manager: Subject(ManagerMessage),
@@ -145,7 +151,7 @@ fn handle_pool_message(
       actor.continue(WorkerPoolState(..state, self: Some(subject)))
     }
 
-    SubmitJob(job_id, url) -> {
+    SubmitJob(job_id, url, config) -> {
       // Check rate limiting - convert to milliseconds for comparison
       let current_time_ms = get_timestamp_ms()
       let rate_limit_ms = state.config.rate_limit_delay_ms
@@ -161,6 +167,7 @@ fn handle_pool_message(
             worker_id,
             job_id,
             url,
+            config,
             state.manager_subject,
             state.self,
           )
@@ -189,7 +196,12 @@ fn handle_pool_message(
         [_worker, ..], False -> {
           // Worker available but rate limit prevents dispatch - queue and schedule delayed dispatch
           let work =
-            PendingWork(job_id: job_id, url: url, queued_at: get_timestamp())
+            PendingWork(
+              job_id: job_id,
+              url: url,
+              config: config,
+              queued_at: get_timestamp(),
+            )
           let new_queue = list.append(state.work_queue, [work])
           let delay_needed = rate_limit_ms - time_since_last
 
@@ -207,7 +219,12 @@ fn handle_pool_message(
         [], _ -> {
           // No available workers - queue the work
           let work =
-            PendingWork(job_id: job_id, url: url, queued_at: get_timestamp())
+            PendingWork(
+              job_id: job_id,
+              url: url,
+              config: config,
+              queued_at: get_timestamp(),
+            )
           let new_queue = list.append(state.work_queue, [work])
 
           // Track high water mark for adaptive scaling
@@ -259,15 +276,16 @@ fn handle_pool_message(
       case dict.get(state.busy_workers, worker_id) {
         Ok(info) -> {
           // Verify the download result and check file existence
-          let #(status, stats_update) = case result {
-            DownloadComplete(_, path) -> {
-              // CRITICAL: Check if file actually exists before marking as completed
-              // yt-dlp can return exit code 0 even when no file was downloaded
-              case verify_file_exists(path, job_id, state.config) {
+          let #(status, path, stats_update) = case result {
+            DownloadComplete(_, reported_path) -> {
+              // Verify the exact path reported by yt-dlp. Do not reconstruct a
+              // filename from the job id: templates may use title/channel/date.
+              case verify_file_exists(reported_path) {
                 Ok(actual_path) -> {
                   io.println("✓ File verified at: " <> actual_path)
                   #(
                     Completed,
+                    Some(actual_path),
                     PoolStats(
                       ..state.stats,
                       total_completed: state.stats.total_completed + 1,
@@ -278,6 +296,7 @@ fn handle_pool_message(
                   io.println("⚠️  File verification failed: " <> reason)
                   #(
                     Failed(reason),
+                    None,
                     PoolStats(
                       ..state.stats,
                       total_failed: state.stats.total_failed + 1,
@@ -289,6 +308,7 @@ fn handle_pool_message(
             DownloadFailed(_, reason) -> {
               #(
                 Failed(reason),
+                None,
                 PoolStats(
                   ..state.stats,
                   total_failed: state.stats.total_failed + 1,
@@ -296,13 +316,16 @@ fn handle_pool_message(
               )
             }
             _ -> {
-              // Unknown result type - mark as completed but don't update stats
-              #(Completed, state.stats)
+              // Unknown result type - mark as completed but don't update stats.
+              #(Completed, None, state.stats)
             }
           }
 
-          // Notify manager of final status
-          process.send(state.manager_subject, JobStatusUpdate(job_id, status))
+          // Notify manager of final status and exact media path.
+          process.send(
+            state.manager_subject,
+            JobStatusUpdate(job_id, status, path),
+          )
 
           // Return worker to available pool
           let new_available = [info.worker, ..state.available_workers]
@@ -348,7 +371,7 @@ fn handle_pool_message(
       // Notify manager of failure
       process.send(
         state.manager_subject,
-        JobStatusUpdate(job_id, Failed(reason)),
+        JobStatusUpdate(job_id, Failed(reason), None),
       )
 
       // Remove from busy workers
@@ -429,6 +452,7 @@ fn handle_pool_message(
             worker_id,
             work.job_id,
             work.url,
+            work.config,
             state.manager_subject,
             state.self,
           )
@@ -490,6 +514,7 @@ fn handle_pool_message(
             worker_id,
             work.job_id,
             work.url,
+            work.config,
             state.manager_subject,
             state.self,
           )
@@ -583,6 +608,7 @@ fn handle_pool_message(
                 <> int.to_string(st.config.download_timeout_ms / 60_000)
                 <> " minutes",
               ),
+              None,
             ),
           )
 
@@ -681,7 +707,7 @@ fn handle_worker_message(
   message: WorkerMessage,
 ) -> actor.Next(WorkerState, WorkerMessage) {
   case message {
-    ExecuteDownload(job_id, url, worker_id, pool, manager) -> {
+    ExecuteDownload(job_id, url, config, worker_id, pool, manager) -> {
       io.println(
         "🔄 Worker "
         <> worker_id
@@ -689,8 +715,8 @@ fn handle_worker_message(
         <> job_id_to_string(job_id),
       )
 
-      // Execute the download with proper error handling
-      let result = execute_download_safely(job_id, url, state.config, manager)
+      // Execute the download with the submission's immutable config snapshot.
+      let result = execute_download_safely(job_id, url, config, manager)
 
       // Report back to pool
       case result {
@@ -752,14 +778,21 @@ fn assign_work_to_worker(
   worker_id: String,
   job_id: JobId,
   url: String,
+  config: ytdlp.DownloadConfig,
   manager: Subject(ManagerMessage),
   pool: Option(Subject(PoolMessage)),
 ) -> Nil {
   case pool {
     Some(p) -> {
       // Notify manager that job is now downloading
-      process.send(manager, JobStatusUpdate(job_id, core_types.Downloading(0)))
-      process.send(worker, ExecuteDownload(job_id, url, worker_id, p, manager))
+      process.send(
+        manager,
+        JobStatusUpdate(job_id, core_types.Downloading(0), None),
+      )
+      process.send(
+        worker,
+        ExecuteDownload(job_id, url, config, worker_id, p, manager),
+      )
     }
     None -> Nil
   }
@@ -776,62 +809,11 @@ fn schedule_health_check(pool: Subject(PoolMessage)) -> Nil {
   Nil
 }
 
-/// Verify that a downloaded file actually exists
-///
-/// This is critical because yt-dlp can return exit code 0 (success) even when:
-/// - The file already existed and was skipped
-/// - The download was filtered by size/format
-/// - The video is geo-blocked or unavailable
-/// - The file was partially downloaded then removed
-fn verify_file_exists(
-  _path: String,
-  job_id: JobId,
-  config: ytdlp.DownloadConfig,
-) -> Result(String, String) {
-  // The path from downloader might be a placeholder or directory
-  // We need to check for actual files with the job_id prefix
-  let job_id_str = job_id_to_string(job_id)
-
-  // Common video extensions yt-dlp might use
-  let extensions = [
-    ".mp4", ".mkv", ".webm", ".m4a", ".mp3", ".opus", ".flac", ".wav", ".avi",
-    ".mov", ".wmv", ".flv", ".f4v", ".3gp", ".ts", ".m4v",
-  ]
-
-  // Try to find the actual file by checking common extensions
-  let potential_files =
-    list.map(extensions, fn(ext) {
-      config.output_directory <> "/" <> job_id_str <> ext
-    })
-
-  // Find first existing file
-  case
-    list.find(potential_files, fn(file_path) {
-      case simplifile.is_file(file_path) {
-        Ok(True) -> True
-        _ -> False
-      }
-    })
-  {
-    Ok(found_path) -> {
-      // Verify file is not empty (catch partial downloads)
-      case simplifile.file_info(found_path) {
-        Ok(_info) -> {
-          // File exists and we got info, assume it's valid
-          // Note: simplifile.FileInfo doesn't have a size field in the public API
-          // We just check that file_info succeeds
-          Ok(found_path)
-        }
-        Error(_) -> Ok(found_path)
-        // If we can't get info but file exists, assume OK
-      }
-    }
-    Error(_) -> {
-      // No file found with expected extensions
-      Error(
-        "Download reported success but no output file found (file may already exist, be filtered, or download failed)",
-      )
-    }
+/// Verify that the exact path reported by yt-dlp points to a regular file.
+fn verify_file_exists(path: String) -> Result(String, String) {
+  case simplifile.is_file(path) {
+    Ok(True) -> Ok(path)
+    _ -> Error("Download reported success but output file is missing: " <> path)
   }
 }
 

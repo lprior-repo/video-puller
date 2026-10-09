@@ -13,6 +13,7 @@ import domain/core_types
 import domain/types.{
   type JobId, type ManagerMessage, ForceShutdown, SetSelf, SetWorkerPool,
 }
+import engine/ytdl_sub
 import engine/ytdlp
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
@@ -62,6 +63,9 @@ pub fn start(
 }
 
 /// Start the manager actor with custom worker pool settings
+///
+/// Worker-pool sizing comes from `min_workers`/`max_workers`; `max_concurrency`
+/// is retained for callers that configured it historically.
 pub fn start_with_workers(
   db: Db,
   config: ytdlp.DownloadConfig,
@@ -70,13 +74,21 @@ pub fn start_with_workers(
   min_workers: Int,
   max_workers: Int,
 ) -> Result(Subject(ManagerMessage), actor.StartError) {
+  let data_root = ytdl_sub.layout_from_env().root
+  let initial_config = case repo.get_download_config(db) {
+    Ok(saved_config) -> ytdlp.resolve_output_directory(saved_config, data_root)
+    // The caller supplies environment/default values as the documented
+    // fallback when persisted settings are unavailable.
+    Error(_) -> ytdlp.resolve_output_directory(config, data_root)
+  }
+
   let state =
     ManagerState(
       db: db,
-      config: config,
-      poll_interval_ms: poll_interval_ms,
+      config: initial_config,
       active_downloads: dict.new(),
       max_concurrency: max_concurrency,
+      poll_interval_ms: poll_interval_ms,
       worker_pool: None,
       self: None,
       stats: core_types.ManagerStats(
@@ -99,8 +111,8 @@ pub fn start_with_workers(
     // Set self reference
     process.send(subject, SetSelf(subject))
 
-    // Initialize worker pool with configured capacity
-    case worker_pool.start(config, subject, min_workers, max_workers) {
+    // Initialize worker pool with the persisted startup configuration.
+    case worker_pool.start(initial_config, subject, min_workers, max_workers) {
       Ok(pool) -> {
         io.println(
           "✅ Worker pool initialized (min="
@@ -148,9 +160,16 @@ fn handle_message(
       actor.continue(ManagerState(..new_state, stats: updated_stats))
     }
 
-    types.JobStatusUpdate(job_id, status) -> {
+    types.JobStatusUpdate(job_id, status, path) -> {
       let timestamp = get_timestamp()
       let _ = repo.update_status(state.db, job_id, status, timestamp)
+      case path {
+        Some(media_path) -> {
+          let _ = repo.update_path(state.db, job_id, media_path, timestamp)
+          Nil
+        }
+        None -> Nil
+      }
 
       let job_id_str = types.job_id_to_string(job_id)
 
@@ -301,7 +320,11 @@ fn poll_and_dispatch(state: ManagerState) -> ManagerState {
       // Reload config from database for dynamic settings support
       // This allows settings changed in the UI to take effect on next poll
       let fresh_config = case repo.get_download_config(state.db) {
-        Ok(config) -> config
+        Ok(config) ->
+          ytdlp.resolve_output_directory(
+            config,
+            ytdl_sub.layout_from_env().root,
+          )
         Error(_) -> state.config
       }
       let state = ManagerState(..state, config: fresh_config)
@@ -333,7 +356,10 @@ fn poll_and_dispatch(state: ManagerState) -> ManagerState {
                     let #(active, count) = acc
 
                     // Submit to worker pool
-                    process.send(pool, pool_types.SubmitJob(job.id, job.url))
+                    process.send(
+                      pool,
+                      pool_types.SubmitJob(job.id, job.url, state.config),
+                    )
 
                     // Log job dispatch
                     log_job_dispatch(job.id, job.url)
@@ -444,10 +470,13 @@ fn run_download_fallback(
         make_download_message(job_id, url, reply_subject, manager_subject),
       )
 
-      case process.receive(reply_subject, 1_800_000) {
+      case process.receive(reply_subject, config.download_timeout_ms) {
         Ok(result) -> {
-          let status = result_to_status(result)
-          process.send(manager_subject, types.JobStatusUpdate(job_id, status))
+          let #(status, path) = result_to_status_and_path(result)
+          process.send(
+            manager_subject,
+            types.JobStatusUpdate(job_id, status, path),
+          )
         }
         Error(_) -> {
           process.send(
@@ -455,6 +484,7 @@ fn run_download_fallback(
             types.JobStatusUpdate(
               job_id,
               core_types.Failed("Download timeout exceeded"),
+              None,
             ),
           )
         }
@@ -466,6 +496,7 @@ fn run_download_fallback(
         types.JobStatusUpdate(
           job_id,
           core_types.Failed("Failed to start downloader"),
+          None,
         ),
       )
     }
@@ -499,11 +530,18 @@ fn shutdown_immediately(state: ManagerState) -> Nil {
 }
 
 /// Convert download result to video status
-fn result_to_status(result: types.DownloadResult) -> types.VideoStatus {
+fn result_to_status_and_path(
+  result: types.DownloadResult,
+) -> #(types.VideoStatus, Option(String)) {
   case result {
-    core_types.DownloadComplete(_, _) -> core_types.Completed
-    core_types.DownloadFailed(_, reason) -> core_types.Failed(reason)
-    _ -> core_types.Completed
+    core_types.DownloadComplete(_, path) -> #(core_types.Completed, Some(path))
+    core_types.DownloadFailed(_, reason) -> #(core_types.Failed(reason), None)
+    // Started/progress results are not terminal: the job keeps downloading
+    core_types.DownloadStarted(_) -> #(core_types.Downloading(0), None)
+    core_types.DownloadProgress(_, progress) -> #(
+      core_types.Downloading(progress),
+      None,
+    )
   }
 }
 

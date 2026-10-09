@@ -6,13 +6,16 @@
 /// - Continues operating despite database errors (13m.79)
 /// - Shuts down cleanly so tests do not leave actors behind
 import core/manager
-import domain/types.{GetStats, Shutdown}
+import domain/core_types
+import domain/types.{GetStats, JobStatusUpdate, Shutdown}
 import engine/ytdlp
 import gleam/erlang/process
+import gleam/option.{Some}
 import gleeunit
 import gleeunit/should
 import infra/db
 import infra/migrator
+import infra/repo
 import simplifile
 
 pub fn main() {
@@ -178,6 +181,46 @@ pub fn manager_stats_test() {
     Error(_) -> should.fail()
   }
 
+  let _ = db.close(conn)
+  cleanup_test_db(db_path)
+}
+
+// ============================================================================
+// Test: completion persists the exact reported media path
+// ============================================================================
+
+pub fn manager_records_reported_media_path_test() {
+  let db_path = "/tmp/test_manager_reported_path.db"
+  let conn = setup_test_db(db_path)
+  let job_id = core_types.new_job_id("job-without-media-prefix")
+  let media_path = "/tmp/media-title-channel-2026.mp4"
+
+  repo.insert_job(conn, job_id, "https://example.com/video", 1000)
+  |> should.be_ok()
+  simplifile.write(media_path, "media") |> should.be_ok()
+
+  case manager.start(conn, test_config(), 5000, 1) {
+    Ok(subject) -> {
+      process.send(
+        subject,
+        JobStatusUpdate(job_id, core_types.Completed, Some(media_path)),
+      )
+      process.sleep(100)
+
+      case repo.get_job(conn, job_id) {
+        Ok(Some(job)) -> {
+          job.path |> should.equal(Some(media_path))
+          job.status |> should.equal(core_types.Completed)
+        }
+        _ -> should.fail()
+      }
+
+      stop_manager(subject)
+    }
+    Error(_) -> should.fail()
+  }
+
+  let _ = simplifile.delete(media_path)
   let _ = db.close(conn)
   cleanup_test_db(db_path)
 }

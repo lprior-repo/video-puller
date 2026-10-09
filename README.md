@@ -14,28 +14,61 @@ A Gleam project scaffold with comprehensive tooling for modern development workf
 - ✅ CI/CD ready with GitHub Actions
 - 📝 Comprehensive documentation
 
-## Quick Start
+## Setup and Run
 
 ### Prerequisites
 
-- [Gleam](https://gleam.run/getting-started/installing/) >= 1.0.0
-- [just](https://github.com/casey/just) (optional, for task running)
+Runtime (needed by both the dev run and a deployed instance):
 
-### Installation
+- Erlang/OTP >= 25 (tested on OTP 28)
+- [`ytdl-sub`](https://github.com/jmbannon/ytdl-sub) — the subscription pull
+  engine (`pipx install ytdl-sub`)
+- `yt-dlp` — single-video jobs, on-demand channel checks and channel-identity
+  resolution for the subscription list
+- `ffmpeg` — mp4 conversion, thumbnails, embedded metadata
+- `deno` — the JS runtime yt-dlp uses for YouTube signature/challenge handling
+
+Development adds:
+
+- [Gleam](https://gleam.run/getting-started/installing/) >= 1.19
+
+### Get the code
 
 ```sh
-gleam add video_puller@1
+git clone https://github.com/lprior-repo/video-puller.git
+cd video-puller
+just setup          # deps download + build (or: gleam deps download && gleam build)
+just ci             # format check + type check + tests
 ```
 
-### Basic Usage
+### Run it (development)
 
-```gleam
-import video_puller
-
-pub fn main() -> Nil {
-  video_puller.main()
-}
+```sh
+DATA_DIR=./data \
+DB_PATH=./data/video_eater.db \
+PORT=8080 \
+POLL_TIMEOUT_MINUTES=360 \
+gleam run
 ```
+
+Then open:
+
+- <http://localhost:8080/> — download queue
+- <http://localhost:8080/settings> — format, size and output settings for
+  single-video jobs
+- <http://localhost:8080/subscriptions> — subscription pulls: enable them, set
+  the cadence, import channels, trigger a poll and see what arrived
+
+### Run it (service)
+
+- Linux: `sudo ./deploy/install.sh` — systemd unit, data in
+  `/var/lib/video-puller`
+- macOS + Plex: `./deploy/macos/install.sh` — LaunchAgent, data in
+  `${DATA_DIR:-$HOME/PlexMedia/YouTube}`
+
+Both installers install the runtime dependencies, drop the release in place and
+wire the service; `deploy/README.txt` has the long form (dependencies,
+permissions, logs, uninstall).
 
 ## Development
 
@@ -260,10 +293,74 @@ and a poll that exits non-zero still records the files it did download while
 reporting the per-subscription errors. The format and size limits on the
 Settings page apply to the yt-dlp job path, not to subscription pulls.
 
+repeat polls are idempotent: ytdl-sub's download archive skips episodes already
+on disk, and seen-video rows are keyed by video id (`INSERT OR REPLACE`), so
+nothing duplicates. To populate the channel list without signing in, drop a
+Google Takeout `subscriptions.csv` into `${DATA_DIR}/ytdl-sub/`: missing URLs
+are merged into `channels.txt` (as `Channel Title = URL`, so the title becomes
+the Plex show name) on the next start or poll, and the CSV is renamed
+`.imported`. Alongside the video, the Plex preset writes Plex-style metadata —
+`poster.jpg` and `fanart.jpg` at the show root, an episode `-thumb.jpg` beside
+each video, and an mp4/h264 file with embedded tags. Plex does not read NFO
+sidecars, so none are generated (the Jellyfin/Emby presets add those); the
+`.info.json` files beside each episode are the engine's own metadata and are
+ignored by Plex.
+
+The same channel can be listed in several URL forms (`@handle`, `@handle/videos`,
+`@handle/shorts`, `channel/UC…`, with or without a trailing slash). Channel
+identity collapses those to one subscription, so a channel never gets two Plex
+shows or two download archives; the channel id is resolved once through
+`yt-dlp` and cached in `${DATA_DIR}/ytdl-sub/channel_ids.txt`. When two entries
+merge, the label that already has a `library/<label>/` directory wins, which
+keeps an existing archive (and Plex show) intact.
+
+An interrupted poll is safe too: the engine writes into
+`${DATA_DIR}/ytdl-sub/working` until a file is complete, and `seen_videos`
+only gets rows from the engine's "Files created" report — so a timed-out poll
+records nothing and the next poll re-checks the channel, skipping episodes
+already in the download archive.
+`POLL_TIMEOUT_MINUTES` is a total deadline for one engine run; streaming
+output cannot extend it.
+
+## Plex
+
+Subscription pulls land directly in a Plex-shaped TV library — one show per
+channel, one season per upload year:
+
+```
+${DATA_DIR}/library/
+└── Fireship/
+    ├── poster.jpg                                # show poster
+    ├── fanart.jpg                                # show background
+    ├── .ytdl-sub-Fireship-download-archive.json  # engine's dedupe archive
+    └── Season 2021/
+        ├── s2021.e032001 - ７ Linux Things You Say WRONG #Shorts.mp4
+        ├── s2021.e032001 - ７ Linux Things You Say WRONG #Shorts-thumb.jpg
+        └── s2021.e032001 - ７ Linux Things You Say WRONG #Shorts.info.json
+```
+
+Ready-for-Plex checklist:
+
+1. Add `${DATA_DIR}/library` to Plex as a **TV Shows** library. Plex reads the
+   `Season <year>` folders, the show-level `poster.jpg`/`fanart.jpg` and each
+   episode's `-thumb.jpg`. There are no NFO files (Plex ignores them) and the
+   `.info.json` sidecars are ytdl-sub's own metadata.
+2. Every episode is an mp4/h264 file with embedded tags (`title`, `date`,
+   `genre`, `synopsis`, `show`), so Plex has metadata even before it fetches
+   anything online; chapters are embedded when the source provides them.
+3. Plex must be able to read the tree. The bundled Linux installer leaves the
+   data root mode 711 (traversable, not listable) with `library/` at 755, so a
+   Plex server running as another user can read the shows while the database
+   stays private. On macOS the LaunchAgent runs as your user, so nothing extra
+   is needed.
+4. Plex picks new episodes up on a library scan; the app never talks to Plex.
+   Because polls update the library in place — and a poll that times out still
+   records the files it downloaded — scanning after a poll is enough.
+
 ### macOS (Plex server)
 
 `deploy/macos/install.sh` installs the runtime with Homebrew (Erlang, ffmpeg,
-pipx, deno), installs `ytdl-sub`, installs the release into
+pipx, deno, `yt-dlp`), installs `ytdl-sub`, installs the release into
 `${INSTALL_DIR:-$HOME/video-puller}`, and runs it as a LaunchAgent with data in
 `${DATA_DIR:-$HOME/PlexMedia/YouTube}`:
 
@@ -271,6 +368,12 @@ pipx, deno), installs `ytdl-sub`, installs the release into
 ./deploy/macos/install.sh
 # then add $DATA_DIR/library as a TV Shows library in Plex
 ```
+
+### Security note
+
+The web UI binds to localhost and ships without authentication or CSRF
+protection of its own: keep it on localhost or a trusted LAN, and put an
+authenticating reverse proxy in front of it before exposing it publicly.
 
 ### Example Configuration
 

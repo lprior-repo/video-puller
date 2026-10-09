@@ -3,6 +3,7 @@
 /// This module defines the PoolMessage type and related types that need to be
 /// shared between worker_pool.gleam and types.gleam without creating import cycles.
 import domain/core_types.{type DownloadResult, type JobId}
+import engine/ytdlp.{type DownloadConfig}
 import gleam/erlang/process.{type Subject}
 
 /// Pool statistics for adaptive scaling
@@ -28,9 +29,8 @@ pub type PoolStatus {
 
 /// Messages the pool can receive
 pub type PoolMessage {
-  // Submit a download job to the pool
-  SubmitJob(job_id: JobId, url: String)
-  // Worker completed a job
+  // Submit a download job together with its immutable settings snapshot.
+  SubmitJob(job_id: JobId, url: String, config: DownloadConfig)
   WorkerDone(worker_id: String, job_id: JobId, result: DownloadResult)
   // Worker failed/crashed
   WorkerFailed(worker_id: String, job_id: JobId, reason: String)

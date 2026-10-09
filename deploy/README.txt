@@ -1,7 +1,8 @@
 FractalVideoEater - Systemd Deployment
 ========================================
 
-This directory contains files for deploying video-puller as a systemd service.
+This directory contains files for deploying video-puller as a systemd service
+on a Linux machine (typically the same box as your Plex server).
 
 Files:
 ------
@@ -25,24 +26,97 @@ Quick Start:
 
 Runtime Dependencies:
 ---------------------
-The following must be installed on the target system:
-- Erlang/OTP >= 25.0 (tested with OTP 26.x)
+Install these before starting; the unit runs with PATH=/usr/local/bin:/usr/bin
+:/bin and only the data directory writable.
+
+- Erlang/OTP >= 25.0 (tested with OTP 26+/28.x)
   - The release uses erlang-shipment which bundles the BEAM files
   - Only the Erlang runtime is needed, not the full development environment
-- yt-dlp (for video downloading functionality)
-  - Install via: pip install yt-dlp
-  - Or package manager: apt install yt-dlp / pacman -S yt-dlp
-- FFmpeg (optional, recommended for post-processing)
-  - Install via package manager: apt install ffmpeg / pacman -S ffmpeg
+- ytdl-sub (subscription pull engine). Install it system-wide, e.g.
+      sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install ytdl-sub
+  or via your package manager, and keep the binary on the unit's PATH.
+- yt-dlp (single-video jobs, channel-identity resolution)
+      sudo pipx install yt-dlp    # or: apt install yt-dlp / pacman -S yt-dlp
+- FFmpeg (mp4 conversion, thumbnails, embedded metadata)
+      apt install ffmpeg / pacman -S ffmpeg
+- deno (JS runtime yt-dlp uses for YouTube challenge handling)
+      apt install deno / pacman -S deno
+
+Data and library layout:
+------------------------
+The unit sets DATA_DIR=/var/lib/video-puller, so everything the app owns lives
+there:
+
+- /var/lib/video-puller/video_eater.db
+      application database (jobs, settings, subscription state, seen videos)
+- /var/lib/video-puller/ytdl-sub/
+      engine layout: config.yaml, channels.txt, subscriptions.yaml,
+      channel_ids.txt (resolved channel identities), working/ (download cache)
+- /var/lib/video-puller/downloads/
+      manual URL-box jobs (a relative output directory is resolved against
+      DATA_DIR)
+- /var/lib/video-puller/library/<Channel>/Season <Year>/
+      the Plex library (see below)
+
+DATA_DIR is resolved to an absolute path at startup, so a relative value cannot
+produce relative library paths in the engine's output.
+
+Subscription pulls (no cookies):
+-------------------------------
+Subscriptions use public channel URLs only - no browser profile, no cookies, no
+account access.
+
+1. Open http://<host>:8080/subscriptions
+2. Add channels to /var/lib/video-puller/ytdl-sub/channels.txt, one per line:
+       https://www.youtube.com/@SomeChannel
+       Nice Display Name = https://www.youtube.com/channel/UCxxxxxxxx
+   A Google Takeout export works too: drop the `subscriptions.csv` into
+   /var/lib/video-puller/ytdl-sub/ and restart; the channel titles are carried
+   over as display names and the CSV is renamed `.imported`.
+3. Enable subscription pulls on the Subscriptions page and pick a cadence, then
+   use "Refresh Now" (POST /subscriptions/poll) for an immediate poll.
+4. The first poll of a channel backfills its whole public upload history. Set
+   POLL_TIMEOUT_MINUTES high enough for that backfill; polls are killed at the
+   deadline and whatever already downloaded is kept and recorded, so a long
+   backfill simply continues on the next poll.
+
+Plex:
+-----
+Add /var/lib/video-puller/library as a **TV Shows** library in Plex. One
+channel becomes one show:
+
+    library/
+    └── Fireship/
+        ├── poster.jpg                                 (show poster)
+        ├── fanart.jpg                                 (show background)
+        ├── .ytdl-sub-Fireship-download-archive.json   (engine dedupe archive)
+        └── Season 2021/
+            ├── s2021.e032001 - Title.mp4              (mp4/h264 + embedded tags)
+            ├── s2021.e032001 - Title-thumb.jpg        (episode thumbnail)
+            └── s2021.e032001 - Title.info.json        (engine metadata)
+
+Plex reads the `Season <year>` folders, poster.jpg/fanart.jpg and the episode
+-thumb.jpg files. No NFO files are written (Plex ignores them); .info.json
+sidecars are ytdl-sub's own metadata.
+
+Permissions: install.sh leaves the data root mode 711 (traversable, not
+listable) and library/ at 755, and hardens any existing video_eater.db* to 600.
+The Plex service account therefore needs no shared login - only filesystem read
+access to /var/lib/video-puller/library. New content is created 755/644 (umask
+022), which Plex can read.
+
+Plex picks new episodes up on a library scan; the app does not call Plex. Polls
+update the library in place, so rescanning (or Plex's periodic scan) after a
+poll is enough.
 
 Installation Details:
 ---------------------
 The installation script will:
 - Create a system user 'video-puller'
 - Install the application to /opt/video-puller
-- Create data directory at /var/lib/video-puller
+- Create data directory at /var/lib/video-puller (library + engine layout)
 - Install and enable the systemd service
-- Build the optimized release (erlang-shipment)
+- Build the optimized release (erlang-shipment) as the service user
 
 Manual Installation:
 --------------------
@@ -52,13 +126,15 @@ If you prefer to install manually:
    sudo useradd --system --no-create-home --shell /usr/sbin/nologin video-puller
 
 2. Create directories:
-   sudo mkdir -p /opt/video-puller
-   sudo mkdir -p /var/lib/video-puller
+   sudo mkdir -p /opt/video-puller /var/lib/video-puller/library
 
-3. Copy project files:
+3. Copy project files, then set ownership (copy first so build artifacts are
+   not left root-owned):
    sudo cp -r . /opt/video-puller/
    sudo chown -R video-puller:video-puller /opt/video-puller
    sudo chown -R video-puller:video-puller /var/lib/video-puller
+   sudo chmod 711 /var/lib/video-puller
+   sudo chmod -R 755 /var/lib/video-puller/library
 
 4. Build the project release:
    cd /opt/video-puller
@@ -75,7 +151,9 @@ Configuration:
 Edit the service file to customize:
 - PORT (default: 8080)
 - DB_PATH (default: /var/lib/video-puller/video_eater.db)
+- DATA_DIR (default: /var/lib/video-puller; engine layout + library root)
 - STATIC_DIR (default: /opt/video-puller/priv/static)
+- POLL_TIMEOUT_MINUTES (default: 360; total deadline for one engine run)
 - SECRET_KEY (optional, auto-generated if not set)
 
 Service file location: /etc/systemd/system/video-puller.service
@@ -120,6 +198,11 @@ The service is configured with security hardening:
 - ProtectSystem=strict (read-only system directories)
 - ProtectHome enabled (no access to home directories)
 - Only /var/lib/video-puller is writable
+- ytdl-sub must therefore be installed system-wide (not in a user's home)
+
+The web UI itself has no authentication or CSRF protection: bind it to
+localhost/LAN and put an authenticating reverse proxy in front of it before
+exposing it publicly.
 
 Troubleshooting:
 ----------------
@@ -133,6 +216,16 @@ Troubleshooting:
    - Check what's using port 8080: sudo lsof -i :8080
    - Change PORT in service file
 
-3. Permission errors:
-   - Verify ownership: ls -la /var/lib/video-puller
-   - Fix ownership: sudo chown -R video-puller:video-puller /var/lib/video-puller
+3. Subscriptions never download anything:
+   - Check the log for "ytdl-sub layout setup failed" or a channels error
+   - Confirm the engine is on the unit's PATH:
+       sudo -u video-puller env PATH=/usr/local/bin:/usr/bin:/bin ytdl-sub --version
+   - Confirm DATA_DIR is writable by the service user
+   - Confirm channels.txt has at least one channel URL
+   - Raise POLL_TIMEOUT_MINUTES if the log shows "Command timeout exceeded"
+     during a first backfill
+
+4. Plex shows nothing:
+   - Confirm Plex can read the tree: sudo -u <plexuser> ls /var/lib/video-puller/library
+   - Check the library dir modes (711 on the data root, 755 on library)
+   - Trigger a library scan after a poll; the app never refreshes Plex itself

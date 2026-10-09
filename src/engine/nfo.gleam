@@ -4,6 +4,7 @@
 /// These sidecar files enable Plex and Kodi to properly display
 /// video metadata in their libraries.
 import gleam/dynamic/decode
+import gleam/float
 import gleam/int
 import gleam/json
 import gleam/list
@@ -425,16 +426,38 @@ fn format_actor_thumb(thumbnail: Option(String)) -> String {
 @external(erlang, "erlang", "min")
 fn float_min(a: Float, b: Float) -> Float
 
+/// Format a float with a fixed number of decimals
+///
+/// `io_lib:format` returns an iolist, which cannot cross the FFI boundary as a
+/// `String` and raised `badarg` (killing the downloader actor), so the digits
+/// are assembled here instead.
 fn format_float(f: Float, decimals: Int) -> String {
-  // Simple float formatting using erlang
-  do_format_float(f, decimals)
+  case decimals <= 0 {
+    True -> int.to_string(float.round(f))
+    False -> {
+      let scaled = float.round(f *. pow10(decimals))
+      let negative = scaled < 0
+      let digits = int.to_string(int.absolute_value(scaled))
+      let padded = case string.length(digits) > decimals {
+        True -> digits
+        False ->
+          string.repeat("0", decimals + 1 - string.length(digits)) <> digits
+      }
+      let whole = string.drop_end(padded, decimals)
+      let fraction = string.slice(padded, string.length(whole), decimals)
+      let sign = case negative {
+        True -> "-"
+        False -> ""
+      }
+      sign <> whole <> "." <> fraction
+    }
+  }
 }
 
-@external(erlang, "io_lib", "format")
-fn erlang_format(format: String, args: List(Float)) -> String
-
-fn do_format_float(f: Float, decimals: Int) -> String {
-  let format_str = "~." <> int.to_string(decimals) <> "f"
-  erlang_format(format_str, [f])
-  |> string.trim
+fn pow10(exponent: Int) -> Float {
+  case exponent <= 0 {
+    True -> 1.0
+    False ->
+      list.fold(list.repeat(10.0, exponent), 1.0, fn(acc, _) { acc *. 10.0 })
+  }
 }

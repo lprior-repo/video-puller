@@ -2,7 +2,7 @@
 ///
 /// Constructs safe yt-dlp commands with proper argument escaping.
 /// CRITICAL: All URL inputs must be validated (INV-001).
-import domain/types.{type JobId}
+import domain/core_types.{type JobId}
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
@@ -17,6 +17,28 @@ fn youtube_js_args() -> List(String) {
     "--remote-components",
     "ejs:github",
   ]
+}
+
+/// Resolve a relative output directory against the data root
+///
+/// The default is "./downloads", but the service runs with a read-only working
+/// directory (ProtectSystem=strict), so a relative directory would point
+/// outside the writable data root. Configs are normalized where they are
+/// loaded, and the reported media path is stored as given by yt-dlp.
+pub fn resolve_output_directory(
+  config: DownloadConfig,
+  data_root: String,
+) -> DownloadConfig {
+  case string.starts_with(config.output_directory, "/") {
+    True -> config
+    False -> {
+      let relative = case string.starts_with(config.output_directory, "./") {
+        True -> string.drop_start(config.output_directory, 2)
+        False -> config.output_directory
+      }
+      DownloadConfig(..config, output_directory: data_root <> "/" <> relative)
+    }
+  }
 }
 
 /// Audio format options for audio-only downloads
@@ -88,6 +110,11 @@ pub fn build_download_args(
     // Max filesize limit
     "--max-filesize",
     config.max_filesize,
+    // Report the path after yt-dlp has moved the finished media file. The
+    // downloader uses this machine-readable line instead of reconstructing a
+    // path from the job id (which is not part of the filename template).
+    "--print",
+    "after_move:filepath",
     // Progress output
     "--newline",
     "--progress",

@@ -371,3 +371,53 @@ pub fn job_from_subscription_test() {
 
   cleanup_test_db(conn, "job_create")
 }
+
+// =============================================================================
+// Library Reconciliation Tests
+// =============================================================================
+
+/// A poll cut short before the engine printed its file report leaves files in
+/// the library that the download archive skips on every later poll;
+/// reconciliation records them, exactly once.
+pub fn reconcile_library_records_unreported_files_test() {
+  let conn = setup_test_db("reconcile")
+  let library_dir = "/tmp/test_subscription_reconcile"
+  let _ = simplifile.delete_all([library_dir])
+
+  let season = library_dir <> "/Fireship/Season 2021"
+  let episode = season <> "/s2021.e032001 - Short One.mp4"
+  let _ = simplifile.create_directory_all(season)
+  let _ = simplifile.write(episode, "video")
+  let _ =
+    simplifile.write(season <> "/s2021.e032001 - Short One-thumb.jpg", "image")
+  let _ =
+    simplifile.write(season <> "/s2021.e032001 - Short One.info.json", "{}")
+
+  // Thumbnails and sidecars are not records
+  subscription_manager.reconcile_library(conn, library_dir, 1000)
+  |> should.equal(#(1, 0))
+
+  subscription_repo.count_downloaded(conn)
+  |> should.be_ok()
+  |> should.equal(1)
+
+  case subscription_repo.list_seen_videos(conn, 10, 0) {
+    Ok([seen]) -> {
+      seen.channel_name |> should.equal(Some("Fireship"))
+      seen.title |> should.equal("Short One")
+      seen.downloaded |> should.equal(True)
+    }
+    _ -> should.fail()
+  }
+
+  // A later pass finds the row and records nothing
+  subscription_manager.reconcile_library(conn, library_dir, 2000)
+  |> should.equal(#(0, 0))
+
+  subscription_repo.count_downloaded(conn)
+  |> should.be_ok()
+  |> should.equal(1)
+
+  let _ = simplifile.delete_all([library_dir])
+  cleanup_test_db(conn, "reconcile")
+}

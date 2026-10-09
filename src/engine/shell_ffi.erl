@@ -1,6 +1,12 @@
 -module(shell_ffi).
 
--export([open_streaming_port/2, read_line/1, read_line_timeout/2, close_port/1]).
+-export([
+    open_streaming_port/2,
+    read_line/1,
+    read_line_timeout/2,
+    close_port/1,
+    kill_port_tree/1
+]).
 
 %% Open a port for streaming command output
 %% Returns {ok, Port} or {error, Reason}
@@ -90,6 +96,22 @@ read_line_timeout(Port, Timeout) ->
             {ok, {stream_error, list_to_binary(io_lib:format("~p", [Reason]))}}
     after Timeout ->
         {error, timeout}
+    end.
+
+%% Kill the process the port spawned and its direct children
+%%
+%% Closing a port does not reliably terminate an executable that ignores the
+%% EOF (ytdl-sub keeps downloading and holds its working-directory lock), so
+%% the timeout path kills it explicitly.
+kill_port_tree(Port) ->
+    case erlang:port_info(Port, os_pid) of
+        {os_pid, OsPid} ->
+            Pid = integer_to_list(OsPid),
+            _ = os:cmd("pkill -9 -P " ++ Pid),
+            _ = os:cmd("kill -9 " ++ Pid),
+            ok;
+        _ ->
+            ok
     end.
 
 %% Close the port gracefully

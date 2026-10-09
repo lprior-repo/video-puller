@@ -47,44 +47,43 @@ pub fn start(
   |> result.map(fn(started) { started.data })
 }
 
-/// Check if a downloaded file exists for the given job_id
-/// Returns the full path if found, or Error if no file exists
-fn find_downloaded_file(
-  job_id: JobId,
-  output_directory: String,
-) -> Result(String, Nil) {
-  let job_id_str = core_types.job_id_to_string(job_id)
-
-  // Read directory contents
-  case simplifile.read_directory(output_directory) {
-    Ok(files) -> {
-      // Look for files that start with the job_id
-      files
-      |> list.filter(fn(filename) { string.starts_with(filename, job_id_str) })
-      |> list.first
-      |> result.map(fn(filename) { output_directory <> "/" <> filename })
-    }
-    Error(_) -> Error(Nil)
+/// Collect lines printed by yt-dlp while the command is running.
+///
+/// The `after_move:filepath` print hook is emitted after the final media path
+/// is known. Keeping all output in a private subject lets the progress callback
+/// remain streaming while the completion path can select the reported file.
+fn collect_output_lines(
+  subject: Subject(String),
+  lines: List(String),
+) -> List(String) {
+  case process.receive(subject, 0) {
+    Ok(line) -> collect_output_lines(subject, [line, ..lines])
+    Error(_) -> list.reverse(lines)
   }
 }
 
-/// Generate NFO sidecar file from the .info.json file
-/// Searches for the corresponding .info.json file and generates .nfo
-fn generate_nfo_sidecar(video_path: String, output_directory: String) -> Nil {
-  // Find the .info.json file that matches the video
-  // yt-dlp creates {title}.info.json alongside {title}.mp4
+/// Select the path reported by yt-dlp's after-move hook.
+fn find_reported_file(lines: List(String)) -> Result(String, Nil) {
+  lines
+  |> list.map(string.trim)
+  |> list.find(fn(path) {
+    case simplifile.is_file(path) {
+      Ok(True) -> True
+      _ -> False
+    }
+  })
+}
+
+/// Generate NFO sidecar file from the .info.json file next to the media file.
+fn generate_nfo_sidecar(video_path: String) -> Nil {
+  let output_directory = get_parent_directory(video_path)
   let video_basename = get_basename_without_ext(video_path)
 
   case simplifile.read_directory(output_directory) {
     Ok(files) -> {
-      // Find matching .info.json file
       let info_json_opt =
         files
-        |> list.filter(fn(f) {
-          string.ends_with(f, ".info.json")
-          && string.starts_with(f, video_basename)
-        })
-        |> list.first
+        |> list.find(fn(f) { f == video_basename <> ".info.json" })
 
       case info_json_opt {
         Ok(info_json_file) -> {
@@ -100,16 +99,31 @@ fn generate_nfo_sidecar(video_path: String, output_directory: String) -> Nil {
   }
 }
 
-/// Get basename of a file path without extension
+/// Get the directory portion of a path.
+fn get_parent_directory(path: String) -> String {
+  let parts =
+    path
+    |> string.split("/")
+    |> list.reverse
+    |> list.drop(1)
+    |> list.reverse
+
+  case string.join(parts, "/") {
+    "" -> "."
+    directory -> directory
+  }
+}
+
+/// Get basename of a file path without its final extension.
 fn get_basename_without_ext(path: String) -> String {
   let parts = string.split(path, "/")
   let filename = case list.last(parts) {
     Ok(f) -> f
     Error(_) -> path
   }
-  // Remove extension
-  case string.split(filename, ".") {
-    [base, ..] -> base
+  let extension_parts = string.split(filename, ".") |> list.reverse
+  case extension_parts {
+    [_extension, ..rest] -> string.join(list.reverse(rest), ".")
     [] -> filename
   }
 }
@@ -148,58 +162,47 @@ fn execute_download_streaming(
   // Build command arguments
   case ytdlp.build_download_args(url, job_id, config, option.None) {
     Ok(args) -> {
-      // Execute yt-dlp command with streaming output
-      case
+      let reported_output = process.new_subject()
+
+      // Execute yt-dlp with streaming progress and collect its machine-readable
+      // after-move path output. The path is emitted only after the final move,
+      // so it also handles channel subfolders and post-processing extensions.
+      let shell_result =
         shell.run_streaming("yt-dlp", args, fn(line) {
-          // Parse progress from each line
+          process.send(reported_output, line)
+
           case parser.parse_progress(line) {
-            Ok(progress_info) -> {
-              // Only send update if progress changed
+            Ok(progress_info) ->
               process.send(
                 progress_subject,
                 UpdateProgress(job_id, progress_info.percentage),
               )
-            }
             Error(_) -> Nil
           }
           Nil
         })
-      {
+
+      let output_lines = collect_output_lines(reported_output, [])
+
+      case shell_result {
         Ok(exit_code) -> {
-          case exit_code {
-            0 -> {
-              // Exit code 0 - check for downloaded file
-              case find_downloaded_file(job_id, config.output_directory) {
-                Ok(path) -> {
-                  // Generate NFO sidecar file
-                  generate_nfo_sidecar(path, config.output_directory)
-                  DownloadComplete(job_id, path)
-                }
-                Error(_) -> {
-                  // Exit code 0 but no file found - unexpected
+          case find_reported_file(output_lines) {
+            Ok(path) -> {
+              // The reported path is the same path used for NFO generation and
+              // later worker-pool verification. A file landed, so a reported
+              // path wins even when yt-dlp exits non-zero for later warnings.
+              generate_nfo_sidecar(path)
+              DownloadComplete(job_id, path)
+            }
+            Error(_) ->
+              case exit_code {
+                0 ->
                   DownloadFailed(
                     job_id,
                     "Download reported success but file not found",
                   )
-                }
+                _ -> DownloadFailed(job_id, "Download failed with exit code")
               }
-            }
-            _ -> {
-              // Non-zero exit code - check if file exists anyway
-              // yt-dlp returns exit code 1 for warnings even when download succeeds
-              case find_downloaded_file(job_id, config.output_directory) {
-                Ok(path) -> {
-                  // File exists despite non-zero exit code - treat as success
-                  // Generate NFO sidecar file
-                  generate_nfo_sidecar(path, config.output_directory)
-                  DownloadComplete(job_id, path)
-                }
-                Error(_) -> {
-                  // No file found - genuine failure
-                  DownloadFailed(job_id, "Download failed with exit code")
-                }
-              }
-            }
           }
         }
         Error(shell.ExecutionError(msg)) ->

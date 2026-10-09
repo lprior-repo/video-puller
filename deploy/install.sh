@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+umask 022
+
+
 # Installation script for video-puller systemd service
 # This script must be run as root or with sudo
 
@@ -56,16 +59,14 @@ fi
 
 # Create data directory
 info "Creating data directory: $DATA_DIR"
-mkdir -p "$DATA_DIR"
+mkdir -p "$DATA_DIR/library"
 
-# Set ownership
-info "Setting ownership..."
-chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR"
-chown -R "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIR"
-
-# Set permissions
-chmod 755 "$INSTALL_DIR"
-chmod 700 "$DATA_DIR"
+# Plex should use ${DATA_DIR}/library as its TV Shows library. The service
+# account and Plex need no shared login; Plex only needs filesystem read access.
+chmod 711 "$DATA_DIR"
+chmod -R 755 "$DATA_DIR/library"
+# ytdl-sub is an administrator-managed dependency; install it with the
+# package manager or pipx of your choice. The systemd unit supplies its PATH.
 
 # Check if Gleam is installed
 if ! command -v gleam &> /dev/null; then
@@ -84,6 +85,14 @@ if [[ -f "gleam.toml" ]]; then
 else
     error "gleam.toml not found. Please run this script from the project root directory"
 fi
+# Set ownership
+info "Setting ownership..."
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR"
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIR"
+
+# With a 711 data root the database filename remains reachable; keep its
+# contents private.
+find "$DATA_DIR" -maxdepth 1 -name 'video_eater.db*' -exec chmod 600 {} + 2>/dev/null || true
 
 # Build the project release
 info "Building the project release..."

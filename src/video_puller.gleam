@@ -54,15 +54,11 @@ pub fn main() -> Nil {
           let sub_manager = case subscription_manager.start(db) {
             Ok(sub_subject) -> {
               io.println("📺 Subscription manager started")
-              // Check if subscriptions are enabled and trigger initial poll
+              // Report the schedule; the manager arms its own timer as soon as
+              // it receives its self reference, so there is nothing to kick
               case subscription_repo.get_config(db) {
-                Ok(sub_config) if sub_config.enabled -> {
+                Ok(sub_config) if sub_config.enabled ->
                   io.println("   Auto-download enabled, scheduling polls")
-                  process.send(
-                    sub_subject,
-                    subscription_manager.ScheduleNextPoll,
-                  )
-                }
                 _ -> Nil
               }
               Some(sub_subject)

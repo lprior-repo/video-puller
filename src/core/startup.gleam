@@ -4,6 +4,7 @@
 /// - Preparing the ytdl-sub engine layout for subscription pulls
 /// - Running database migrations (INV-002: must run before app start)
 /// - Fixing zombie jobs (INV-003: revert processing jobs to pending)
+import core/subscription_manager
 import engine/takeout
 import engine/ytdl_sub
 import envoy
@@ -47,7 +48,16 @@ pub fn initialize() -> Result(Db, DbError) {
   setup_ytdl_sub()
 
   // Merge a dropped Google Takeout subscriptions.csv into channels.txt
-  takeout.import_and_log(ytdl_sub.layout_from_env())
+  let layout = ytdl_sub.layout_from_env()
+  takeout.import_and_log(layout)
+
+  // Record library files left by a poll that was interrupted earlier: the
+  // engine's archive skips them, so nothing else would ever record them
+  log_reconcile(subscription_manager.reconcile_library(
+    conn,
+    layout.library_dir,
+    get_current_timestamp(),
+  ))
 
   // Fix zombie jobs
   io.println("🧟 Checking for zombie jobs...")
@@ -110,6 +120,28 @@ fn setup_ytdl_sub() -> Nil {
   }
 
   Nil
+}
+
+/// Report the library files recorded from an earlier interrupted poll
+fn log_reconcile(recorded_and_failed: #(Int, Int)) -> Nil {
+  let #(recorded, failed) = recorded_and_failed
+  case recorded, failed {
+    0, 0 -> Nil
+    n, 0 ->
+      io.println(
+        "📚 Recorded "
+        <> int.to_string(n)
+        <> " library file(s) from an earlier poll",
+      )
+    n, f ->
+      io.println(
+        "📚 Recorded "
+        <> int.to_string(n)
+        <> " library file(s), "
+        <> int.to_string(f)
+        <> " could not be written",
+      )
+  }
 }
 
 /// Run database migrations (INV-002)

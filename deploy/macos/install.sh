@@ -21,12 +21,21 @@ LABEL="local.video-puller"
 PLIST="$PLIST_DIR/$LABEL.plist"
 REPO_URL="https://github.com/lprior-repo/video-puller.git"
 BREW_BIN="$(brew --prefix 2>/dev/null)/bin"
+LAUNCH_PATH="$BREW_BIN:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 info() { printf '\033[0;32m[INFO]\033[0m %s\n' "$1"; }
 warn() { printf '\033[0;33m[WARN]\033[0m %s\n' "$1"; }
 error() {
   printf '\033[0;31m[ERROR]\033[0m %s\n' "$1"
   exit 1
+}
+
+xml_escape() {
+  local value=$1
+  value=${value//&/&amp;}
+  value=${value//</&lt;}
+  value=${value//>/&gt;}
+  printf '%s' "$value"
 }
 
 if [[ "$(uname -s)" != "Darwin" && "${ALLOW_NON_MAC:-0}" != "1" ]]; then
@@ -36,7 +45,7 @@ fi
 command -v brew >/dev/null 2>&1 || error "Homebrew is required: https://brew.sh"
 
 info "Installing runtime dependencies with Homebrew"
-for formula in erlang ffmpeg pipx deno; do
+for formula in erlang ffmpeg pipx deno yt-dlp; do
   if brew list --formula "$formula" >/dev/null 2>&1; then
     info "  $formula already installed"
   else
@@ -45,12 +54,17 @@ for formula in erlang ffmpeg pipx deno; do
   fi
 done
 
-if command -v ytdl-sub >/dev/null 2>&1; then
+if PATH="$LAUNCH_PATH" command -v ytdl-sub >/dev/null 2>&1; then
   info "  ytdl-sub already installed"
 else
   info "  installing ytdl-sub with pipx"
   pipx install ytdl-sub
 fi
+
+PATH="$LAUNCH_PATH" command -v ytdl-sub >/dev/null 2>&1 ||
+  error "ytdl-sub is not available on the LaunchAgent PATH ($LAUNCH_PATH)"
+PATH="$LAUNCH_PATH" command -v yt-dlp >/dev/null 2>&1 ||
+  error "yt-dlp is not available on the LaunchAgent PATH ($LAUNCH_PATH)"
 
 if command -v erl >/dev/null 2>&1; then
   OTP="$(erl -noshell -eval 'io:format("~s", [erlang:system_info(otp_release)]), halt().' 2>/dev/null || echo unknown)"
@@ -70,6 +84,8 @@ else
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     info "Updating $INSTALL_DIR"
     git -C "$INSTALL_DIR" pull --ff-only
+  elif [[ -d "$INSTALL_DIR" && -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    error "$INSTALL_DIR is a non-git deployment; refusing to clone into its non-empty directory"
   else
     info "Cloning $REPO_URL"
     git clone "$REPO_URL" "$INSTALL_DIR"
@@ -104,54 +120,78 @@ mkdir -p "$DATA_DIR/logs" "$LIBRARY_DIR"
 
 info "Writing LaunchAgent $PLIST"
 mkdir -p "$PLIST_DIR"
-cat > "$PLIST" <<PLIST
+
+XML_LABEL="$(xml_escape "$LABEL")"
+XML_ENTRYPOINT="$(xml_escape "$INSTALL_DIR/build/erlang-shipment/entrypoint.sh")"
+XML_INSTALL_DIR="$(xml_escape "$INSTALL_DIR")"
+XML_PATH="$(xml_escape "$LAUNCH_PATH")"
+XML_PORT="$(xml_escape "$PORT")"
+XML_DATA_DIR="$(xml_escape "$DATA_DIR")"
+XML_DB_PATH="$(xml_escape "$DATA_DIR/video_eater.db")"
+XML_STATIC_DIR="$(xml_escape "$INSTALL_DIR/priv/static")"
+XML_POLL_TIMEOUT="$(xml_escape "$POLL_TIMEOUT_MINUTES")"
+XML_LOG_PATH="$(xml_escape "$DATA_DIR/logs/video-puller.log")"
+
+TEMP_PLIST="$(mktemp "$PLIST_DIR/.${LABEL}.plist.XXXXXX")" ||
+  error "Could not create a temporary plist in $PLIST_DIR"
+trap 'rm -f "$TEMP_PLIST"' EXIT
+cat > "$TEMP_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>$LABEL</string>
+  <string>$XML_LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$INSTALL_DIR/build/erlang-shipment/entrypoint.sh</string>
+    <string>$XML_ENTRYPOINT</string>
     <string>run</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>$INSTALL_DIR</string>
+  <string>$XML_INSTALL_DIR</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>$BREW_BIN:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>$XML_PATH</string>
     <key>PORT</key>
-    <string>$PORT</string>
+    <string>$XML_PORT</string>
     <key>DATA_DIR</key>
-    <string>$DATA_DIR</string>
+    <string>$XML_DATA_DIR</string>
     <key>DB_PATH</key>
-    <string>$DATA_DIR/video_eater.db</string>
+    <string>$XML_DB_PATH</string>
     <key>STATIC_DIR</key>
-    <string>$INSTALL_DIR/priv/static</string>
+    <string>$XML_STATIC_DIR</string>
     <key>POLL_TIMEOUT_MINUTES</key>
-    <string>$POLL_TIMEOUT_MINUTES</string>
+    <string>$XML_POLL_TIMEOUT</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>$DATA_DIR/logs/video-puller.log</string>
+  <string>$XML_LOG_PATH</string>
   <key>StandardErrorPath</key>
-  <string>$DATA_DIR/logs/video-puller.log</string>
+  <string>$XML_LOG_PATH</string>
 </dict>
 </plist>
 PLIST
 
-if command -v launchctl >/dev/null 2>&1; then
+if command -v plutil >/dev/null 2>&1; then
+  plutil -lint "$TEMP_PLIST" || error "Generated plist failed validation"
+else
+  warn "plutil not available; skipping plist validation"
+fi
+
+mv -f "$TEMP_PLIST" "$PLIST"
+trap - EXIT
+
+if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
   info "Starting the service"
   launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
   launchctl bootstrap "gui/$UID" "$PLIST"
   launchctl kickstart -k "gui/$UID/$LABEL"
 else
-  warn "launchctl not available; load $PLIST manually"
+  warn "launchctl not available on this platform; load $PLIST manually"
 fi
 
 info "Waiting for the web server on port $PORT"
