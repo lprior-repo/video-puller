@@ -279,7 +279,7 @@ fn run_pull_worker(self: Subject(SubscriptionMessage)) -> Nil {
         Ok(channels) ->
           case ytdl_sub.write_subscriptions(layout, channels) {
             Error(err) -> Error("subscriptions: " <> err)
-            Ok(_) -> ytdl_sub.run_pull(layout, pull_timeout_ms())
+            Ok(_) -> run_poll_phases(layout)
           }
       }
     }
@@ -287,6 +287,110 @@ fn run_pull_worker(self: Subject(SubscriptionMessage)) -> Nil {
 
   process.send(self, PollFinished(outcome))
 }
+
+/// Run one poll in two passes over the same channel list
+///
+/// The recent pass checks every channel for fresh uploads inside a slice of the
+/// poll budget, then the backfill pass spends the rest on the channel backlog.
+/// A long first backfill therefore cannot leave new uploads waiting behind it,
+/// and a pass that fails still leaves the other pass's downloads recorded.
+fn run_poll_phases(
+  layout: ytdl_sub.Layout,
+) -> Result(ytdl_sub.PullSummary, String) {
+  let #(recent_ms, backfill_ms) =
+    phase_timeouts(pull_timeout_ms(), recent_phase_ms())
+
+  io.println(
+    "Poll pass 1/2 - recent uploads: up to "
+    <> int.to_string(recent_ms / 60_000)
+    <> " min",
+  )
+  let recent =
+    label_pass(
+      "recent pass",
+      ytdl_sub.run_pull(layout, layout.recent_subscriptions_file, recent_ms),
+    )
+  log_pass("recent", recent)
+
+  io.println(
+    "Poll pass 2/2 - backfill: up to "
+    <> int.to_string(backfill_ms / 60_000)
+    <> " min",
+  )
+  let backfill =
+    label_pass(
+      "backfill pass",
+      ytdl_sub.run_pull(layout, layout.subscriptions_file, backfill_ms),
+    )
+  log_pass("backfill", backfill)
+
+  ytdl_sub.merge_summaries(recent, backfill)
+}
+
+/// Name the pass in its errors, so a poll row says which one failed
+fn label_pass(
+  name: String,
+  outcome: Result(ytdl_sub.PullSummary, String),
+) -> Result(ytdl_sub.PullSummary, String) {
+  case outcome {
+    Ok(summary) ->
+      Ok(
+        ytdl_sub.PullSummary(
+          ..summary,
+          errors: list.map(summary.errors, fn(err) { name <> ": " <> err }),
+        ),
+      )
+    Error(err) -> Error(name <> ": " <> err)
+  }
+}
+
+/// Report what a pass produced, including a failed one
+fn log_pass(
+  name: String,
+  outcome: Result(ytdl_sub.PullSummary, String),
+) -> Nil {
+  case outcome {
+    Ok(summary) ->
+      io.println(
+        "  "
+        <> name
+        <> ": "
+        <> int.to_string(summary.downloaded)
+        <> " file(s), "
+        <> int.to_string(list.length(summary.errors))
+        <> " error(s)",
+      )
+    Error(err) -> io.println("  " <> name <> " failed: " <> err)
+  }
+}
+
+/// Split the poll budget between the recent-upload pass and the backfill
+///
+/// The recent pass never takes more than its own setting or a quarter of the
+/// poll budget, and the backfill always keeps at least a minute.
+pub fn phase_timeouts(total_ms: Int, recent_ms: Int) -> #(Int, Int) {
+  let cap = int.max(int.min(total_ms / 4, recent_ms), 1000)
+  let recent = int.min(cap, int.max(total_ms - minimum_backfill_ms, 1000))
+  #(recent, total_ms - recent)
+}
+
+/// Budget for the recent-upload pass (`RECENT_PHASE_MINUTES`)
+fn recent_phase_ms() -> Int {
+  let minutes = case envoy.get("RECENT_PHASE_MINUTES") {
+    Ok(raw) ->
+      case int.parse(raw) {
+        Ok(minutes) if minutes > 0 -> minutes
+        _ -> default_recent_phase_minutes
+      }
+    Error(_) -> default_recent_phase_minutes
+  }
+  minutes * 60_000
+}
+
+const default_recent_phase_minutes = 30
+
+/// The backfill pass always gets at least this much of the poll budget
+const minimum_backfill_ms = 60_000
 
 /// Record each newly added file in the seen-video table
 ///
@@ -382,10 +486,12 @@ fn start_poll(
       // Unlinked on purpose: a crashed worker must not take the manager down,
       // and the watchdog recovers the polling flag either way
       let _ = process.spawn_unlinked(fn() { run_pull_worker(self) })
+      // Two engine passes share the poll budget, so the watchdog leaves room
+      // for both deadlines plus the startup and teardown of each process
       let watchdog =
         process.send_after(
           self,
-          pull_timeout_ms() + 60_000,
+          pull_timeout_ms() + 120_000,
           PollWatchdog(state.poll_generation),
         )
       actor.continue(

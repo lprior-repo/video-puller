@@ -130,7 +130,12 @@ The application respects these environment variables:
   channel-id cache, working dir) and the Plex library (default: `./data`)
 - `CHANNELS_TEMPLATE` - Channel list seeded into `DATA_DIR` on first start
   (default: `./priv/ytdl-sub/channels.txt`)
-- `POLL_TIMEOUT_MINUTES` - Deadline for a single engine run (default: `360`)
+- `POLL_TIMEOUT_MINUTES` - Total deadline for one poll, both engine passes
+  included (default: `360`)
+- `RECENT_VIDEOS` - Newest uploads the recent pass inspects per channel
+  (default: `5`)
+- `RECENT_PHASE_MINUTES` - Budget cap for the recent pass; it never takes more
+  than a quarter of the poll (default: `30`)
 
 Subscription pulls and the Plex library layout are documented in `README.md`
 (§Subscription Pulls, §Plex); the installers in `deploy/` and

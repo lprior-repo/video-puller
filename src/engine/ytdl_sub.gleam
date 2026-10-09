@@ -31,6 +31,7 @@ pub type Layout {
     root: String,
     config_file: String,
     subscriptions_file: String,
+    recent_subscriptions_file: String,
     channels_file: String,
     channel_ids_file: String,
     takeout_file: String,
@@ -68,6 +69,7 @@ pub fn layout(root: String) -> Layout {
     root: root,
     config_file: ytdl_sub_dir <> "/config.yaml",
     subscriptions_file: ytdl_sub_dir <> "/subscriptions.yaml",
+    recent_subscriptions_file: ytdl_sub_dir <> "/subscriptions-recent.yaml",
     channels_file: ytdl_sub_dir <> "/channels.txt",
     channel_ids_file: ytdl_sub_dir <> "/channel_ids.txt",
     takeout_file: ytdl_sub_dir <> "/subscriptions.csv",
@@ -317,44 +319,146 @@ pub fn dedupe_channels(
   })
 }
 
-/// Generate the ytdl-sub subscriptions file for the configured channels.
+/// Newest uploads the recent pass inspects per channel, unless overridden
+pub const default_recent_videos = 5
+
+/// Generate the ytdl-sub subscription files for the configured channels.
+///
+/// Two files are written for every poll: the full list, which the backfill pass
+/// works through, and the same list limited to each channel's newest uploads,
+/// so a fresh upload is fetched even while a long backlog is still being
+/// downloaded.
 pub fn write_subscriptions(
   layout: Layout,
   channels: List(Channel),
 ) -> Result(Nil, String) {
+  write_subscriptions_with(layout, channels, recent_video_count())
+}
+
+/// Write both subscription files with an explicit recent-pass window
+pub fn write_subscriptions_with(
+  layout: Layout,
+  channels: List(Channel),
+  recent_videos: Int,
+) -> Result(Nil, String) {
   let resolved = resolve_channel_ids(channels, layout.channel_ids_file)
   let ids = channel_ids(resolved, load_cache(layout.channel_ids_file))
   let channels = dedupe_channels(resolved, ids, layout.library_dir)
-  let content =
-    "__preset__:\n"
-    <> "  overrides:\n"
-    <> "    tv_show_directory: \""
-    <> escape_yaml(layout.library_dir)
-    <> "\"\n"
-    // The resolution assert aborts on any download below 361p, which
-    // false-positives on genuinely low-res uploads and skips them forever;
-    // throttle protection's request pacing stays enabled.
-    <> "    enable_resolution_assert: False\n"
-    <> "\n"
-    <> "Plex TV Show by Date:\n"
-    <> "  = YouTube:\n"
-    <> list.fold(channels, "", fn(acc, channel) {
-      let label = case channel.label {
-        Some(value) -> value
-        None -> subscription_label(channel.url)
-      }
-      acc
-      <> "    \""
-      <> escape_yaml(label)
-      <> "\": \""
-      <> escape_yaml(channel.url)
-      <> "\"\n"
-    })
+  let recent_videos = case recent_videos > 0 {
+    True -> recent_videos
+    False -> default_recent_videos
+  }
+  use _ <- result.try(
+    write_subscription_file(layout.subscriptions_file, layout, channels, []),
+  )
+  write_subscription_file(layout.recent_subscriptions_file, layout, channels, [
+    #("playlist_end", int.to_string(recent_videos)),
+  ])
+}
 
-  simplifile.write(layout.subscriptions_file, content)
+/// Newest-uploads window for the recent pass (`RECENT_VIDEOS`)
+fn recent_video_count() -> Int {
+  case envoy.get("RECENT_VIDEOS") {
+    Ok(raw) ->
+      case int.parse(raw) {
+        Ok(count) if count > 0 -> count
+        _ -> default_recent_videos
+      }
+    Error(_) -> default_recent_videos
+  }
+}
+
+fn write_subscription_file(
+  path: String,
+  layout: Layout,
+  channels: List(Channel),
+  ytdl_options: List(#(String, String)),
+) -> Result(Nil, String) {
+  simplifile.write(path, subscriptions_content(layout, channels, ytdl_options))
   |> result.map_error(fn(err) {
-    "cannot write " <> layout.subscriptions_file <> ": " <> file_error(err)
+    "cannot write " <> path <> ": " <> file_error(err)
   })
+}
+
+fn subscriptions_content(
+  layout: Layout,
+  channels: List(Channel),
+  ytdl_options: List(#(String, String)),
+) -> String {
+  "__preset__:\n"
+  <> "  overrides:\n"
+  <> "    tv_show_directory: \""
+  <> escape_yaml(layout.library_dir)
+  <> "\"\n"
+  // The resolution assert aborts on any download below 361p, which
+  // false-positives on genuinely low-res uploads and skips them forever;
+  // throttle protection's request pacing stays enabled.
+  <> "    enable_resolution_assert: False\n"
+  <> ytdl_options_block(ytdl_options)
+  <> "\n"
+  <> "Plex TV Show by Date:\n"
+  <> "  = YouTube:\n"
+  <> list.fold(channels, "", fn(acc, channel) {
+    let label = case channel.label {
+      Some(value) -> value
+      None -> subscription_label(channel.url)
+    }
+    acc
+    <> "    \""
+    <> escape_yaml(label)
+    <> "\": \""
+    <> escape_yaml(channel.url)
+    <> "\"\n"
+  })
+}
+
+/// Render the ytdl_options plugin block that sits beside `overrides`
+///
+/// `ytdl_options` is a ytdl-sub plugin, so it is declared as a sibling of the
+/// `overrides` block; nesting it under `overrides` fails validation.
+fn ytdl_options_block(options: List(#(String, String))) -> String {
+  case options {
+    [] -> ""
+    [_, ..] ->
+      "  ytdl_options:\n"
+      <> list.fold(options, "", fn(acc, option) {
+        let #(key, value) = option
+        acc <> "    " <> key <> ": " <> value <> "\n"
+      })
+  }
+}
+
+/// Combine the two passes of one poll into a single outcome
+///
+/// Files the surviving pass downloaded are kept even when the other pass
+/// failed, files are never counted twice, and both failures are reported when
+/// neither pass produced anything.
+pub fn merge_summaries(
+  recent: Result(PullSummary, String),
+  backfill: Result(PullSummary, String),
+) -> Result(PullSummary, String) {
+  let files =
+    list.unique(list.append(summary_files(recent), summary_files(backfill)))
+  let errors = list.append(summary_errors(recent), summary_errors(backfill))
+  case recent, backfill {
+    Error(recent_error), Error(backfill_error) ->
+      Error(recent_error <> " | " <> backfill_error)
+    _, _ -> Ok(PullSummary(list.length(files), files, errors))
+  }
+}
+
+fn summary_files(outcome: Result(PullSummary, String)) -> List(String) {
+  case outcome {
+    Ok(summary) -> summary.added_files
+    Error(_) -> []
+  }
+}
+
+fn summary_errors(outcome: Result(PullSummary, String)) -> List(String) {
+  case outcome {
+    Ok(summary) -> summary.errors
+    Error(error) -> [error]
+  }
 }
 
 /// Label used as the subscription name for a channel URL.
@@ -639,6 +743,7 @@ fn channel_ids(
 /// Run a full ytdl-sub pass over the subscriptions file
 pub fn run_pull(
   layout: Layout,
+  subscriptions_file: String,
   timeout_ms: Int,
 ) -> Result(PullSummary, String) {
   let args = [
@@ -646,7 +751,7 @@ pub fn run_pull(
     "--config",
     layout.config_file,
     "sub",
-    layout.subscriptions_file,
+    subscriptions_file,
   ]
 
   case shell.run_with_timeout(engine_command, args, timeout_ms) {

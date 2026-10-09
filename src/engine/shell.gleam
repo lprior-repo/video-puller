@@ -210,9 +210,10 @@ fn timeout_error(stdout_acc: List(String)) -> ShellError {
 
 /// The most recent non-empty output lines, oldest first, truncated
 fn output_tail(lines: List(String)) -> String {
+  // The accumulator holds the newest line first, so the newest lines are at
+  // the front; taking from the back would report where the command started
   let tail =
     lines
-    |> list.reverse
     |> list.filter(fn(line) { !string.is_empty(string.trim(line)) })
     |> list.take(2)
     |> list.reverse

@@ -260,11 +260,18 @@ The application can be configured using the following environment variables:
 Subscriptions pull public channel URLs straight from YouTube with `ytdl-sub`; they
 never read browser cookies and run one channel at a time.
 
+Every poll runs the engine twice over the same channel list: a **recent pass**
+that inspects only the newest uploads of each channel, then a **backfill pass**
+that works through the full history. A fresh upload is therefore picked up on
+the next poll even while a long first backfill is still running.
+
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `DATA_DIR` | Root for the engine layout and the download library | `./data` | No |
 | `CHANNELS_TEMPLATE` | Channel list copied into place on first start | `./priv/ytdl-sub/channels.txt` | No |
-| `POLL_TIMEOUT_MINUTES` | Timeout for a single engine pull | `360` | No |
+| `POLL_TIMEOUT_MINUTES` | Total deadline for one poll, both passes included | `360` | No |
+| `RECENT_VIDEOS` | Newest uploads the recent pass checks per channel | `5` | No |
+| `RECENT_PHASE_MINUTES` | Budget cap for the recent pass (never more than a quarter of the poll) | `30` | No |
 
 ```bash
 # One public channel URL per line; blank lines and # comments are ignored
@@ -318,15 +325,18 @@ merge, the label that already has a `library/<label>/` directory wins, which
 keeps an existing archive (and Plex show) intact.
 
 An interrupted poll is safe too: the engine writes into
-`${DATA_DIR}/ytdl-sub/working` until a file is complete, the deadline kills the
+`${DATA_DIR}/ytdl-sub/working` until a file is complete, a deadline kills the
 engine's whole process tree, and after every poll — successful or timed out —
 the app reconciles the library, recording media files that have no row yet and
-ignoring thumbnails, sidecars and archives. A first poll that times out
-mid-backfill therefore keeps what it already downloaded, and the next poll
-skips those episodes through the download archive.
-`POLL_TIMEOUT_MINUTES` is a total deadline for one engine run; streaming
-output cannot extend it, and the timeout error carries the last engine output
-so a stalled enumeration (a very large channel) is diagnosable.
+ignoring thumbnails, sidecars and archives. A poll that times out mid-backfill
+therefore keeps what it already downloaded, and the next poll skips those
+episodes through the download archive.
+`POLL_TIMEOUT_MINUTES` is a total deadline for one poll: the recent pass takes
+at most its configured slice (and never more than a quarter), the backfill pass
+gets the rest, streaming output cannot extend either, and a timed-out pass
+reports the tail of its engine output so a stalled enumeration (a very large
+channel) is diagnosable. Each pass reports its own file and error counts, so a
+poll says plainly how much of the list it covered.
 
 ## Plex
 

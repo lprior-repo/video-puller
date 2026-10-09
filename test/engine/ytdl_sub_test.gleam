@@ -466,3 +466,81 @@ pub fn to_discovered_video_falls_back_to_path_identity_test() {
   |> should.equal("Channel One/Season 2026/s2026.e091101 - Video Two.mp4")
   video.channel_id |> should.equal(None)
 }
+
+// =============================================================================
+// Two-pass subscription files
+
+/// Every poll writes both lists: the full channel history for the backfill
+/// pass, and the newest uploads for the pass that runs first
+pub fn write_subscriptions_writes_recent_pass_file_test() {
+  let root = "/tmp/test_ytdl_sub_recent"
+  let layout = ytdl_sub.layout(root)
+  let _ = simplifile.create_directory_all(root <> "/ytdl-sub")
+  let _ =
+    simplifile.write(
+      layout.channel_ids_file,
+      "https://www.youtube.com/@Fireship\tUCfireship\tFireship\n",
+    )
+
+  ytdl_sub.write_subscriptions_with(
+    layout,
+    [ytdl_sub.Channel(None, "https://www.youtube.com/@Fireship")],
+    3,
+  )
+  |> should.be_ok()
+
+  let backfill = simplifile.read(layout.subscriptions_file) |> should.be_ok()
+  let recent =
+    simplifile.read(layout.recent_subscriptions_file) |> should.be_ok()
+
+  // The backfill list carries no recent window: it walks the full history
+  backfill |> string.contains("playlist_end") |> should.be_false()
+  backfill
+  |> string.contains("\"Fireship\": \"https://www.youtube.com/@Fireship\"")
+  |> should.be_true()
+
+  // The recent list covers the same channels, capped to their newest uploads,
+  // and writes into the same library. `ytdl_options` is a plugin, so it sits
+  // beside the overrides block - nesting it there fails engine validation.
+  recent
+  |> string.contains("  ytdl_options:\n    playlist_end: 3\n")
+  |> should.be_true()
+  recent
+  |> string.contains("tv_show_directory: \"" <> layout.library_dir <> "\"")
+  |> should.be_true()
+  recent
+  |> string.contains("\"Fireship\": \"https://www.youtube.com/@Fireship\"")
+  |> should.be_true()
+
+  let _ = simplifile.delete_all([root])
+}
+
+/// A failed pass does not discard the other pass's downloads, and a file
+/// reported by both passes is counted once
+pub fn merge_summaries_keeps_partial_downloads_test() {
+  ytdl_sub.merge_summaries(
+    Ok(ytdl_sub.PullSummary(1, ["/library/A.mp4"], ["shorts failed"])),
+    Ok(ytdl_sub.PullSummary(2, ["/library/A.mp4", "/library/B.mp4"], [])),
+  )
+  |> should.equal(
+    Ok(
+      ytdl_sub.PullSummary(2, ["/library/A.mp4", "/library/B.mp4"], [
+        "shorts failed",
+      ]),
+    ),
+  )
+
+  ytdl_sub.merge_summaries(
+    Error("recent: timed out"),
+    Ok(ytdl_sub.PullSummary(1, ["/library/A.mp4"], [])),
+  )
+  |> should.equal(
+    Ok(ytdl_sub.PullSummary(1, ["/library/A.mp4"], ["recent: timed out"])),
+  )
+}
+
+/// When neither pass produced anything, both failures are reported
+pub fn merge_summaries_reports_both_failures_test() {
+  ytdl_sub.merge_summaries(Error("recent: timeout"), Error("backfill: timeout"))
+  |> should.equal(Error("recent: timeout | backfill: timeout"))
+}

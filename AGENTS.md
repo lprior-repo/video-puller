@@ -182,7 +182,16 @@ cookies and no account access at any point.
   directory.
 - **Polling**: DB-backed config (`poll_interval_minutes`); manual trigger is
   `POST /subscriptions/poll` ("Refresh Now" on `/subscriptions`);
-  `POLL_TIMEOUT_MINUTES` (default 360) caps one engine run.
+  `POLL_TIMEOUT_MINUTES` (default 360) caps one poll.
+- **Two passes per poll**: `subscriptions-recent.yaml` runs first, with every
+  channel capped to its `RECENT_VIDEOS` (default 5) newest uploads, so fresh
+  uploads are fetched while a backlog is still being worked through; then
+  `subscriptions.yaml` (full history) runs on the remaining budget. The recent
+  pass takes at most `RECENT_PHASE_MINUTES` (default 30) and never more than a
+  quarter of the poll; the backfill always keeps at least a minute.
+  `phase_timeouts/2` owns the split, and `merge_summaries/2` combines the
+  outcomes — files from a surviving pass are kept, a failed pass is reported,
+  and a file both passes reported is counted once.
 
 ### Idempotency guarantees
 
@@ -211,8 +220,9 @@ Repeat runs are safe by construction; keep these invariants when refactoring:
   back to the library-relative path otherwise. The poll report and
   `reconcile_library` use the same mapping, so a file is never recorded twice
   under two identities.
-- **Timeouts**: `POLL_TIMEOUT_MINUTES` is a total deadline for the engine run
-  (`shell.run_with_timeout`); streaming output cannot extend it, and EOF never
+- **Timeouts**: `POLL_TIMEOUT_MINUTES` is a total deadline for one poll, split
+  across its two passes (`shell.run_with_timeout` per pass); streaming output
+  cannot extend either, and EOF never
   fabricates a zero exit — the child's real exit status is used. A timed-out
   process tree is killed explicitly: closing the port alone does not stop
   ytdl-sub, which keeps downloading in the background and holds its

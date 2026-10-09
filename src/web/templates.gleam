@@ -1358,7 +1358,7 @@ pub fn subscriptions_page(
       ]),
       p([class("text-sm text-gray-400 mt-2")], [
         text(
-          "Subscription channels are listed in channels.txt beside that folder - one channel, playlist or video URL per line, optionally as \"Label = URL\" to name the Plex show. Drop a Google Takeout subscriptions.csv there to import channels without signing in. Fetches are sequential and use no browser cookies. The first poll backfills each channel's full upload history, so raise POLL_TIMEOUT_MINUTES for large channels.",
+          "Subscription channels are listed in channels.txt beside that folder - one channel, playlist or video URL per line, optionally as \"Label = URL\" to name the Plex show. Drop a Google Takeout subscriptions.csv there to import channels without signing in. Fetches are sequential and use no browser cookies. Each poll checks every channel's newest uploads first, then continues the full-history backfill, so raise POLL_TIMEOUT_MINUTES for large channels.",
         ),
       ]),
     ]),

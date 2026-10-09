@@ -75,10 +75,16 @@ account access.
    over as display names and the CSV is renamed `.imported`.
 3. Enable subscription pulls on the Subscriptions page and pick a cadence, then
    use "Refresh Now" (POST /subscriptions/poll) for an immediate poll.
-4. The first poll of a channel backfills its whole public upload history. Set
-   POLL_TIMEOUT_MINUTES high enough for that backfill; polls are killed at the
-   deadline and whatever already downloaded is kept and recorded, so a long
-   backfill simply continues on the next poll.
+4. Each poll runs the engine twice: a recent pass that checks every channel's
+   newest uploads (RECENT_VIDEOS, default 5; capped by RECENT_PHASE_MINUTES,
+   default 30), then a backfill pass that works through the full upload
+   history. New uploads therefore arrive even while a long first backfill is
+   still running. Set POLL_TIMEOUT_MINUTES high enough for the backfill; a pass
+   that hits its deadline is killed, whatever already downloaded is kept and
+   recorded, and the backfill simply continues on the next poll. The log shows
+   both passes with their file/error counts:
+       Poll pass 1/2 - recent uploads: up to 30 min
+       Poll pass 2/2 - backfill: up to 330 min
 
 Plex:
 -----
@@ -153,7 +159,10 @@ Edit the service file to customize:
 - DB_PATH (default: /var/lib/video-puller/video_eater.db)
 - DATA_DIR (default: /var/lib/video-puller; engine layout + library root)
 - STATIC_DIR (default: /opt/video-puller/priv/static)
-- POLL_TIMEOUT_MINUTES (default: 360; total deadline for one engine run)
+- POLL_TIMEOUT_MINUTES (default: 360; total deadline for one poll, both passes)
+- RECENT_VIDEOS (default: 5; newest uploads the recent pass checks per channel)
+- RECENT_PHASE_MINUTES (default: 30; budget cap for the recent pass, never more
+  than a quarter of the poll)
 - SECRET_KEY (optional, auto-generated if not set)
 
 Service file location: /etc/systemd/system/video-puller.service
@@ -224,6 +233,9 @@ Troubleshooting:
    - Confirm channels.txt has at least one channel URL
    - Raise POLL_TIMEOUT_MINUTES if the log shows "Command timeout exceeded"
      during a first backfill
+   - The log names each pass ("Poll pass 1/2 - recent uploads", "Poll pass 2/2
+     - backfill") with the files and errors it produced, so a poll that only
+     covered part of the list says so
 
 4. Plex shows nothing:
    - Confirm Plex can read the tree: sudo -u <plexuser> ls /var/lib/video-puller/library

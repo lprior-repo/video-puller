@@ -49,6 +49,24 @@ pub fn run_with_timeout_enforces_total_deadline_test() {
   { elapsed < 5000 } |> should.be_true()
 }
 
+/// The timeout error carries the newest output, not the oldest: where a
+/// stalled engine started says nothing about where it got stuck
+pub fn run_with_timeout_reports_newest_output_test() {
+  case
+    shell.run_with_timeout(
+      "sh",
+      ["-c", "echo opened; echo working; echo stalled; sleep 30"],
+      1500,
+    )
+  {
+    Error(shell.ExecutionError(message)) -> {
+      string.contains(message, "stalled") |> should.be_true()
+      string.contains(message, "opened") |> should.be_false()
+    }
+    _ -> should.fail()
+  }
+}
+
 pub fn run_with_timeout_returns_output_for_fast_command_test() {
   case shell.run_with_timeout("echo", ["hello"], 5000) {
     Ok(shell.ShellResult(exit_code, stdout, _stderr)) -> {
