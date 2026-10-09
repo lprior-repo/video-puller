@@ -297,14 +297,23 @@ preserved while decorative queries and fragments are dropped.
 Videos land in `${DATA_DIR:-./data}/library/<Channel>/Season <Year>/`. The first
 poll pulls the channel's full upload history; ytdl-sub's per-channel download
 archive under the library root keeps later polls incremental, so only new
-uploads are fetched. Give large channels a matching `POLL_TIMEOUT_MINUTES`,
-since the backfill runs inside one poll. Subscription pulls use ytdl-sub's
+uploads are fetched. A long first backfill does not hold up new uploads: each
+poll's recent pass inspects the newest uploads before the backfill resumes
+where its own deadline stopped it, so set `POLL_TIMEOUT_MINUTES` to the time
+you are happy to have the engine running per poll.
+
+Observed limits: the engine downloads one video at a time and throttle
+protection sleeps ~17s between downloads and ~0.75s between requests, so a
+poll clears a handful of long recordings, and a 75-channel list takes several
+six-hourly polls to backfill. Files are large — a two-channel test landed four
+recordings (72–281MB, 545MB total) in one four-minute poll — and subscription
+pulls have no size cap, so watch free space (`DATA_DIR`'s filesystem held
+523GB free when this was measured). Subscription pulls use ytdl-sub's
 "Plex TV Show by Date" preset with its resolution assert disabled: the assert
 aborts on any download below 361p, which false-positives on genuinely low-res
 uploads rather than throttling. Throttle protection's request pacing stays on,
 and a poll that exits non-zero still records the files it did download while
-reporting the per-subscription errors. The format and size limits on the
-Settings page apply to the yt-dlp job path, not to subscription pulls.
+reporting the per-subscription errors.
 
 Polling is incremental and repeat-safe: ytdl-sub's download archive skips
 episodes already on disk, and every seen-video row carries the video's YouTube
