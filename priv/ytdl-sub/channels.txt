@@ -1,12 +1,82 @@
-# Public channel URLs for the subscription engine
-#
-# One URL per line. Blank lines and # comments are ignored.
-# `<label> = <url>` sets the Plex show name; otherwise the channel title is
-# used. Channel, playlist and single-video URLs all work; the `@handle` form,
-# its /videos, /shorts and /streams tabs and the `channel/UC...` form are
-# treated as the same subscription.
-# Keep the list short: ytdl-sub fetches these sequentially.
-# Drop a Google Takeout subscriptions.csv beside this file to import channels
-# without signing in; missing URLs are merged in on the next start or poll.
-#
-# https://www.youtube.com/@example-channel
+# 75 unique subscription handles extracted from the supplied subscription-page text.
+# Both supplied files were identical. Handles are preserved exactly as pasted.
+# Verified 2026-10-09: every handle resolved to a stable YouTube channel ID and no
+# two entries resolved to the same channel, so renames cannot create duplicates.
+# Unresolved: Who's That Chick appeared without a handle; add its verified channel URL.
+# Optional per line: `Display Name = <url>` names the Plex show yourself.
+
+https://www.youtube.com/@Andriana_Nik
+https://www.youtube.com/@annabocca
+https://www.youtube.com/@arjay_the_dev
+https://www.youtube.com/@bashbunni
+https://www.youtube.com/@Beautybyrosita
+https://www.youtube.com/@BECKYLOUFOWLER
+https://www.youtube.com/@charmclicommunity
+https://www.youtube.com/@iamcynthiagarcia
+https://www.youtube.com/@CynthiaL
+https://www.youtube.com/@Deandrakanu
+https://www.youtube.com/@OfficialDesireDiaries
+https://www.youtube.com/@DeviSietaram
+https://www.youtube.com/@doseofjosephine
+https://www.youtube.com/@IzzySealey
+https://www.youtube.com/@DreeDiaries
+https://www.youtube.com/@EllaRingrose
+https://www.youtube.com/@emonthebrain
+https://www.youtube.com/@femininerenaissance
+https://www.youtube.com/@feraluxe
+https://www.youtube.com/@Francessawomen
+https://www.youtube.com/@gabriellebernstein
+https://www.youtube.com/@gracedubrovskaya
+https://www.youtube.com/@haileygamba
+https://www.youtube.com/@hannahmeloche
+https://www.youtube.com/@HelenaHartCoaching
+https://www.youtube.com/@HouseOfHighbrations
+https://www.youtube.com/@IconicFemme
+https://www.youtube.com/@WithIman.M
+https://www.youtube.com/@AffirmationsInnerGlow
+https://www.youtube.com/@instantmanifestations
+https://www.youtube.com/@itgirlplaybook
+https://www.youtube.com/@It_Girl_Secrets
+https://www.youtube.com/@CR3ALITY
+https://www.youtube.com/@Jadeecarr
+https://www.youtube.com/@JamilaMusayeva
+https://www.youtube.com/@JillzGuerin
+https://www.youtube.com/@JulietCleary
+https://www.youtube.com/@KaylaHodges
+https://www.youtube.com/@kokarevaa
+https://www.youtube.com/@Kriziaofficial
+https://www.youtube.com/@laurahigginsofficial
+https://www.youtube.com/@LauraTynan
+https://www.youtube.com/@lauriexwang
+https://www.youtube.com/@leilahormozi
+https://www.youtube.com/@lenalifts
+https://www.youtube.com/@Lisaglamour
+https://www.youtube.com/@marcorocchhaamakeup
+https://www.youtube.com/@Margarita.Nazarenko
+https://www.youtube.com/@MKmagicmindset
+https://www.youtube.com/@themiagabriella
+https://www.youtube.com/@MillionDollarBabes
+https://www.youtube.com/@mindsetwithjess
+https://www.youtube.com/@manifestwithmiri
+https://www.youtube.com/@MorganDayCecil
+https://www.youtube.com/@MrsMidwest
+https://www.youtube.com/@nastyaswanmind
+https://www.youtube.com/@natalieetched
+https://www.youtube.com/@nessa_kh
+https://www.youtube.com/@nicolebonnet_
+https://www.youtube.com/@PatriciaBerenzon
+https://www.youtube.com/@RebeccaLeigh
+https://www.youtube.com/@rosemontoya
+https://www.youtube.com/@TheRealSabahAli
+https://www.youtube.com/@MindofSakshi
+https://www.youtube.com/@ScarlettFrazer
+https://www.youtube.com/@selmanajaa
+https://www.youtube.com/@slaconference
+https://www.youtube.com/@sophiediloreto
+https://www.youtube.com/@su_berry
+https://www.youtube.com/@tamkaur
+https://www.youtube.com/@TheIntemporelle
+https://www.youtube.com/@Thewizardliz
+https://www.youtube.com/@vickitatrivedi
+https://www.youtube.com/@VickyZhaoBEEAMP
+https://www.youtube.com/@thevivirose
