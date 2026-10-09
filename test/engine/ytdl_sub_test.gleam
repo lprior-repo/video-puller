@@ -60,15 +60,13 @@ pub fn write_subscriptions_uses_supported_presets_test() {
   |> string.contains("tv_show_directory: \"" <> layout.library_dir <> "\"")
   |> should.be_true()
 
-  // Recency filter and show preset on one preset path; "Only Recent Archive"
-  // filters to the range without deleting files from the library
-  content
-  |> string.contains("Plex TV Show by Date | Only Recent Archive:")
-  |> should.be_true()
+  // Show preset with no date window: the pull takes the channel's full history
+  // and ytdl-sub's download archive keeps later polls incremental
+  content |> string.contains("Plex TV Show by Date:") |> should.be_true()
 
   content
-  |> string.contains("only_recent_date_range: \"7days\"")
-  |> should.be_true()
+  |> string.contains("only_recent_date_range")
+  |> should.be_false()
 
   // A bare `preset:` block inside the show group is read as a subscription
   // URL by the engine and injects a phantom error into every poll

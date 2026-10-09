@@ -148,9 +148,8 @@ pub fn write_subscriptions(
     <> "    tv_show_directory: \""
     <> escape_yaml(layout.library_dir)
     <> "\"\n"
-    <> "    only_recent_date_range: \"7days\"\n"
     <> "\n"
-    <> "Plex TV Show by Date | Only Recent Archive:\n"
+    <> "Plex TV Show by Date:\n"
     <> "  = YouTube:\n"
     <> list.fold(channels, "", fn(acc, url) {
       acc

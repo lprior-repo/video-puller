@@ -8,10 +8,13 @@ import engine/ytdl_sub
 import envoy
 import gleam/int
 import gleam/io
+import gleam/list
 import gleam/result
+import gleam/string
 import infra/db.{type Db, type DbError}
 import infra/migrator
 import infra/repo
+import simplifile
 
 /// Run the complete startup sequence
 pub fn initialize() -> Result(Db, DbError) {
@@ -24,6 +27,9 @@ pub fn initialize() -> Result(Db, DbError) {
   }
 
   io.println("📁 Database: " <> db_path)
+
+  // SQLite cannot create the file inside a directory that does not exist
+  ensure_database_directory(db_path)
 
   // Initialize database connection
   use conn <- result.try(db.init_db(db_path))
@@ -51,6 +57,35 @@ pub fn initialize() -> Result(Db, DbError) {
   io.println("🎉 Startup complete!")
 
   Ok(conn)
+}
+
+/// Create the directory that will hold the database file
+fn ensure_database_directory(db_path: String) -> Nil {
+  let directory = database_directory(db_path)
+
+  case simplifile.create_directory_all(directory) {
+    Ok(_) -> Nil
+    Error(_) -> io.println("⚠️  Cannot create database directory " <> directory)
+  }
+}
+
+/// Directory portion of a database path, "." when the path has none
+fn database_directory(path: String) -> String {
+  let parts =
+    path
+    |> string.split("/")
+    |> list.reverse
+    |> list.drop(1)
+    |> list.reverse
+
+  case string.join(parts, "/") {
+    "" ->
+      case string.starts_with(path, "/") {
+        True -> "/"
+        False -> "."
+      }
+    directory -> directory
+  }
 }
 
 /// Prepare the ytdl-sub engine directories, config and channel list

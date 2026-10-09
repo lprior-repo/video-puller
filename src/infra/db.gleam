@@ -25,7 +25,9 @@ pub fn connect(path: String) -> Result(Db, DbError) {
   case sqlight.open(path) {
     Ok(conn) -> Ok(conn)
     Error(err) ->
-      Error(ConnectionError("Failed to open database: " <> sqlight_error(err)))
+      Error(ConnectionError(
+        "Failed to open database " <> path <> ": " <> sqlight_error(err),
+      ))
   }
 }
 

@@ -284,9 +284,25 @@ $EDITOR "${DATA_DIR:-./data}/ytdl-sub/channels.txt"
 open http://localhost:8080/subscriptions
 ```
 
-Videos land in `${DATA_DIR:-./data}/library/<Channel>/Season <Year>/`. The engine
-pulls only the last 7 days per run; every added file is recorded on the
-Subscriptions page.
+Videos land in `${DATA_DIR:-./data}/library/<Channel>/Season <Year>/`. The first
+poll pulls the channel's full upload history; ytdl-sub's per-channel download
+archive under the library root keeps later polls incremental, so only new
+uploads are fetched. Give large channels a matching `POLL_TIMEOUT_MINUTES`,
+since the backfill runs inside one poll. Subscription pulls use ytdl-sub's own
+preset defaults; the format and size limits on the Settings page apply to the
+yt-dlp job path, not to subscription pulls.
+
+### macOS (Plex server)
+
+`deploy/macos/install.sh` installs the runtime with Homebrew (Erlang, ffmpeg,
+pipx, deno), installs `ytdl-sub`, installs the release into
+`${INSTALL_DIR:-$HOME/video-puller}`, and runs it as a LaunchAgent with data in
+`${DATA_DIR:-$HOME/PlexMedia/YouTube}`:
+
+```sh
+./deploy/macos/install.sh
+# then add $DATA_DIR/library as a TV Shows library in Plex
+```
 
 ### Example Configuration
 
