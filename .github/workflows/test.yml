@@ -12,10 +12,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Read toolchain pins
+        id: toolchain
+        run: |
+          {
+            echo "erlang=$(sed -n 's/^erlang = "\(.*\)"$/\1/p' mise.toml)"
+            echo "gleam=$(sed -n 's/^gleam = "\(.*\)"$/\1/p' mise.toml)"
+          } >> "$GITHUB_OUTPUT"
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: "28"
-          gleam-version: "1.19.1"
+          otp-version: ${{ steps.toolchain.outputs.erlang }}
+          gleam-version: ${{ steps.toolchain.outputs.gleam }}
           rebar3-version: "3"
           # elixir-version: "1"
       - run: gleam deps download
