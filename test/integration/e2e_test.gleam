@@ -223,7 +223,6 @@ pub fn idempotency_test() {
 }
 
 /// Test E2E download flow with mocked yt-dlp output
-/// Bead: video-puller-13m.71
 ///
 /// Tests the complete download workflow from job creation to completion
 /// with simulated yt-dlp progress output. This test verifies:
@@ -322,7 +321,6 @@ pub fn full_download_flow_with_mocked_ytdlp_test() {
 }
 
 /// Test E2E subscription pull flow with mocked ytdl-sub output
-/// Bead: video-puller-13m.72
 ///
 /// Tests the retained subscription workflow with simulated engine output:
 /// 1. Subscription configuration setup

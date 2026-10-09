@@ -32,9 +32,3 @@ Thumbs.db
 # Runtime data (local database and download output)
 /data/
 /downloads/
-
-# Beads local store
-.beads/embeddeddolt/
-.beads/backup/
-.beads/last-touched
-.beads/.auto-import-issues.jsonl

@@ -120,7 +120,6 @@ This project is optimized for use with Claude Code. Available slash commands:
 - `/ci` - Run all CI checks
 
 ### Setup & Integration Commands
-- `/setup-beads` - Research and set up Steve Yegge's beads system
 - `/setup-mcp-agent` - Research and register project with MCP agent-mail server
 - `/research` - Conduct thorough research on any topic
 
@@ -136,49 +135,6 @@ This project supports Model Context Protocol for agent coordination:
 - **Build Slots**: Manage concurrent build operations
 
 See `.claude/docs/mcp-agent-setup.md` for comprehensive setup instructions.
-
-## Beads Integration
-
-This project uses [beads](https://github.com/steveyegge/beads) - a lightweight, distributed issue tracker designed for AI coding agents.
-
-### Quick Start
-
-```bash
-# Show ready work (unblocked issues)
-just beads-ready
-
-# Create a new issue
-just beads-create "Issue title" task 1
-
-# Update issue status
-just beads-update bd-a1b2 in_progress
-
-# Show database status
-just beads-status
-
-# Sync with git
-just beads-sync
-```
-
-### Features
-
-- 🎯 **Zero-Setup Distributed Database** - Git-backed, no server required
-- 🔗 **Four Dependency Types** - blocks, related, parent-child, discovered-from
-- 🆔 **Hash-Based IDs** - Collision-resistant (e.g., `bd-a1b2`)
-- ✅ **Ready Work Detection** - Automatically finds unblocked issues
-- 📊 **JSON Output** - All commands support `--json` for agents
-
-### Essential Commands
-
-```bash
-bd ready                        # Show unblocked issues
-bd create "Task" -t feature    # Create new issue
-bd update bd-a1b2 --status in_progress  # Claim work
-bd close bd-a1b2 --reason "Done"       # Complete issue
-bd sync                        # Force git sync
-```
-
-See `.claude/docs/beads-setup.md` for comprehensive documentation and AGENTS.md for workflow guidelines.
 
 ## Testing
 

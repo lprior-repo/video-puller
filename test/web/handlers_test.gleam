@@ -163,7 +163,7 @@ pub fn validate_video_url_no_protocol_error_message_test() {
 // Handler Tests: create_job
 // =============================================================================
 
-/// Test: create_job validates URL format before inserting (13m.54)
+/// Test: create_job validates URL format before inserting
 pub fn create_job_validates_url_format_test() {
   let #(conn, ctx) = setup_test_db("create_job_validates")
 
@@ -185,7 +185,7 @@ pub fn create_job_validates_url_format_test() {
   cleanup_test_db(conn, "create_job_validates")
 }
 
-/// Test: create_job rejects empty URL with error page (13m.55)
+/// Test: create_job rejects empty URL with error page
 pub fn create_job_rejects_empty_url_test() {
   let #(conn, ctx) = setup_test_db("create_job_empty_url")
 
@@ -229,7 +229,7 @@ pub fn create_job_rejects_missing_url_test() {
   cleanup_test_db(conn, "create_job_missing_url")
 }
 
-/// Test: create_job creates job and redirects to dashboard (13m.56)
+/// Test: create_job creates job and redirects to dashboard
 pub fn create_job_creates_and_redirects_test() {
   let #(conn, ctx) = setup_test_db("create_job_success")
 
@@ -301,7 +301,7 @@ pub fn create_job_trims_whitespace_test() {
 // Handler Tests: dashboard
 // =============================================================================
 
-/// Test: dashboard returns all jobs sorted by created_at (13m.57)
+/// Test: dashboard returns all jobs sorted by created_at
 pub fn dashboard_returns_all_jobs_sorted_test() {
   let #(conn, ctx) = setup_test_db("dashboard_sorted")
 
@@ -364,7 +364,7 @@ pub fn dashboard_empty_database_test() {
 // Handler Tests: get_job (job detail)
 // =============================================================================
 
-/// Test: job detail returns 404 for unknown job_id (13m.58)
+/// Test: job detail returns 404 for unknown job_id
 /// Note: Current implementation just redirects to dashboard, but this tests the expected behavior
 pub fn get_job_redirects_to_dashboard_test() {
   let #(conn, ctx) = setup_test_db("get_job_redirect")
@@ -406,7 +406,7 @@ pub fn get_job_redirects_for_valid_job_test() {
 // Handler Tests: subscriptions (subscription_config GET)
 // =============================================================================
 
-/// Test: subscription_config GET renders form with current config (13m.59)
+/// Test: subscription_config GET renders form with current config
 pub fn subscriptions_renders_config_form_test() {
   let #(conn, ctx) = setup_test_db("subscriptions_get")
 

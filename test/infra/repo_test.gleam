@@ -1,7 +1,6 @@
 /// Video Job Repository Tests
 ///
 /// Integration tests for video job data access layer.
-/// Bead: video-puller-13m.73
 import domain/types
 import gleam/option
 import gleeunit
@@ -38,7 +37,6 @@ fn cleanup(conn, path) {
 // Insert Job Tests
 // ============================================================================
 
-/// Bead: video-puller-13m.73
 /// Test insert_job with duplicate job_id returns error
 pub fn insert_duplicate_job_id_returns_error_test() {
   let #(conn, path) = setup_test_db("duplicate_job_id")

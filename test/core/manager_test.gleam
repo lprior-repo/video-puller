@@ -3,7 +3,7 @@
 /// These tests verify that the manager properly:
 /// - Starts successfully with valid database connection
 /// - Responds to stats requests while running
-/// - Continues operating despite database errors (13m.79)
+/// - Continues operating despite database errors
 /// - Shuts down cleanly so tests do not leave actors behind
 import core/manager
 import domain/core_types
@@ -103,7 +103,7 @@ pub fn manager_start_test() {
 }
 
 // ============================================================================
-// Test: Manager keeps operating when database work fails (13m.79)
+// Test: Manager keeps operating when database work fails
 // ============================================================================
 //
 // LIMITATION: closing a SQLite connection underneath the manager causes BEAM

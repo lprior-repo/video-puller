@@ -81,7 +81,7 @@ if [[ -f "gleam.toml" ]]; then
     # We're in the project directory
     cp -r . "$INSTALL_DIR/"
     # Remove development files
-    rm -rf "$INSTALL_DIR/.git" "$INSTALL_DIR/.beads" "$INSTALL_DIR/data" 2>/dev/null || true
+    rm -rf "$INSTALL_DIR/.git" "$INSTALL_DIR/data" 2>/dev/null || true
 else
     error "gleam.toml not found. Please run this script from the project root directory"
 fi

@@ -1,7 +1,6 @@
 /// Subscription Repository Tests
 ///
 /// Integration tests for subscription data access layer.
-/// Beads: video-puller-13m.19 through 13m.29
 import domain/subscription_types.{
   type DiscoveredVideo, DiscoveredVideo, SubscriptionConfig,
 }
@@ -53,10 +52,9 @@ fn cleanup(conn, path) {
 }
 
 // ============================================================================
-// Config Tests (Beads 13m.20, 13m.21)
+// Config Tests
 // ============================================================================
 
-/// Bead: video-puller-13m.21
 /// Test get_config returns sensible default when table is empty
 pub fn get_default_config_test() {
   let #(conn, path) = setup_test_db("default_config")
@@ -71,7 +69,6 @@ pub fn get_default_config_test() {
   cleanup(conn, path)
 }
 
-/// Bead: video-puller-13m.20
 /// Test save_config/get_config roundtrip preserves all fields
 pub fn config_roundtrip_test() {
   let #(conn, path) = setup_test_db("config_roundtrip")
@@ -97,10 +94,9 @@ pub fn config_roundtrip_test() {
 }
 
 // ============================================================================
-// Seen Videos Tests (Beads 13m.22, 13m.23, 13m.24, 13m.25, 13m.26, 13m.29)
+// Seen Videos Tests
 // ============================================================================
 
-/// Bead: video-puller-13m.22
 /// Test record_seen_video creates new entry with pending status
 pub fn record_seen_video_creates_entry_test() {
   let #(conn, path) = setup_test_db("record_seen")
@@ -131,7 +127,6 @@ pub fn record_seen_video_creates_entry_test() {
   cleanup(conn, path)
 }
 
-/// Bead: video-puller-13m.23
 /// Test get_seen_video returns existing entry by video_id
 pub fn get_seen_video_returns_existing_test() {
   let #(conn, path) = setup_test_db("get_seen_existing")
@@ -168,7 +163,6 @@ pub fn get_seen_video_returns_existing_test() {
   cleanup(conn, path)
 }
 
-/// Bead: video-puller-13m.24
 /// Test get_seen_video returns None for unknown video_id
 pub fn get_seen_video_returns_none_test() {
   let #(conn, path) = setup_test_db("get_seen_none")
@@ -180,7 +174,6 @@ pub fn get_seen_video_returns_none_test() {
   cleanup(conn, path)
 }
 
-/// Bead: video-puller-13m.25
 /// Test mark_downloaded updates seen video status and job_id
 pub fn mark_downloaded_updates_status_test() {
   let #(conn, path) = setup_test_db("mark_downloaded")
@@ -222,7 +215,6 @@ pub fn mark_downloaded_updates_status_test() {
   cleanup(conn, path)
 }
 
-/// Bead: video-puller-13m.26
 /// Test mark_skipped updates seen video with skip_reason
 pub fn mark_skipped_updates_skip_reason_test() {
   let #(conn, path) = setup_test_db("mark_skipped")
@@ -256,7 +248,6 @@ pub fn mark_skipped_updates_skip_reason_test() {
   cleanup(conn, path)
 }
 
-/// Bead: video-puller-13m.29
 /// Test list_seen_videos returns entries sorted by discovered_at desc
 pub fn list_seen_videos_sorted_test() {
   let #(conn, path) = setup_test_db("list_seen_sorted")
