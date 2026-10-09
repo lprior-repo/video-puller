@@ -3,7 +3,7 @@
 /// Integration tests for subscription data access layer.
 /// Beads: video-puller-13m.19 through 13m.29
 import domain/subscription_types.{
-  type DiscoveredVideo, ChannelSettings, DiscoveredVideo, SubscriptionConfig,
+  type DiscoveredVideo, DiscoveredVideo, SubscriptionConfig,
 }
 import gleam/list
 import gleam/option.{None, Some}
@@ -65,13 +65,7 @@ pub fn get_default_config_test() {
   let config = subscription_repo.get_config(conn) |> should.be_ok()
 
   config.enabled |> should.be_false()
-  config.poll_interval_minutes |> should.equal(60)
-  config.min_duration_seconds |> should.equal(120)
-  config.max_age_days |> should.equal(7)
-  config.browser |> should.equal(subscription_types.Chromium)
-  config.cookies_path |> should.equal(None)
-  config.keyword_filter |> should.equal([])
-  config.keyword_exclude |> should.equal([])
+  config.poll_interval_minutes |> should.equal(360)
   config.last_poll_at |> should.equal(None)
 
   cleanup(conn, path)
@@ -82,18 +76,10 @@ pub fn get_default_config_test() {
 pub fn config_roundtrip_test() {
   let #(conn, path) = setup_test_db("config_roundtrip")
 
-  // Create custom config with all fields set
   let new_config =
     SubscriptionConfig(
       enabled: True,
       poll_interval_minutes: 30,
-      browser: subscription_types.Chrome,
-      cookies_path: Some("/path/to/cookies.txt"),
-      max_age_days: 14,
-      min_duration_seconds: 180,
-      max_duration_seconds: Some(3600),
-      keyword_filter: ["tutorial", "guide", "howto"],
-      keyword_exclude: ["ad", "sponsored", "promo"],
       last_poll_at: Some(1_700_123_456),
     )
 
@@ -105,13 +91,6 @@ pub fn config_roundtrip_test() {
 
   saved_config.enabled |> should.be_true()
   saved_config.poll_interval_minutes |> should.equal(30)
-  saved_config.browser |> should.equal(subscription_types.Chrome)
-  saved_config.cookies_path |> should.equal(Some("/path/to/cookies.txt"))
-  saved_config.max_age_days |> should.equal(14)
-  saved_config.min_duration_seconds |> should.equal(180)
-  saved_config.max_duration_seconds |> should.equal(Some(3600))
-  saved_config.keyword_filter |> should.equal(["tutorial", "guide", "howto"])
-  saved_config.keyword_exclude |> should.equal(["ad", "sponsored", "promo"])
   saved_config.last_poll_at |> should.equal(Some(1_700_123_456))
 
   cleanup(conn, path)
@@ -326,67 +305,6 @@ pub fn list_seen_videos_sorted_test() {
     }
     _ -> should.fail()
   }
-
-  cleanup(conn, path)
-}
-
-// ============================================================================
-// Channel Settings Tests (Beads 13m.27, 13m.28)
-// ============================================================================
-
-/// Bead: video-puller-13m.27
-/// Test save_channel_settings/get_channel_settings roundtrip
-pub fn channel_settings_roundtrip_test() {
-  let #(conn, path) = setup_test_db("channel_roundtrip")
-
-  let settings =
-    ChannelSettings(
-      channel_id: "UC_roundtrip",
-      channel_name: "Roundtrip Channel",
-      enabled: True,
-      priority: 10,
-      max_age_days: Some(3),
-      min_duration_seconds: Some(60),
-      max_duration_seconds: Some(1800),
-      keyword_filter: ["gaming", "tutorial"],
-      keyword_exclude: ["live", "stream"],
-    )
-
-  // Save channel settings
-  subscription_repo.upsert_channel_settings(conn, settings, 1_700_000_000)
-  |> should.be_ok()
-
-  // Retrieve and verify all fields
-  let retrieved =
-    subscription_repo.get_channel_settings(conn, "UC_roundtrip")
-    |> should.be_ok()
-
-  case retrieved {
-    Some(s) -> {
-      s.channel_id |> should.equal("UC_roundtrip")
-      s.channel_name |> should.equal("Roundtrip Channel")
-      s.enabled |> should.be_true()
-      s.priority |> should.equal(10)
-      s.max_age_days |> should.equal(Some(3))
-      s.min_duration_seconds |> should.equal(Some(60))
-      s.max_duration_seconds |> should.equal(Some(1800))
-      s.keyword_filter |> should.equal(["gaming", "tutorial"])
-      s.keyword_exclude |> should.equal(["live", "stream"])
-    }
-    None -> should.fail()
-  }
-
-  cleanup(conn, path)
-}
-
-/// Bead: video-puller-13m.28
-/// Test get_channel_settings returns None for unknown channel
-pub fn get_channel_settings_returns_none_test() {
-  let #(conn, path) = setup_test_db("channel_none")
-
-  subscription_repo.get_channel_settings(conn, "UC_unknown_channel")
-  |> should.be_ok()
-  |> should.equal(None)
 
   cleanup(conn, path)
 }

@@ -265,6 +265,29 @@ The application can be configured using the following environment variables:
 | `POLL_INTERVAL_MS` | Polling interval for download queue in milliseconds | `5000` | No |
 | `MAX_CONCURRENCY` | Maximum concurrent downloads | `10` | No |
 
+### Subscription Pulls
+
+Subscriptions pull public channel URLs straight from YouTube with `ytdl-sub`; they
+never read browser cookies and run one channel at a time.
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `DATA_DIR` | Root for the engine layout and the download library | `./data` | No |
+| `CHANNELS_TEMPLATE` | Channel list copied into place on first start | `./priv/ytdl-sub/channels.txt` | No |
+| `POLL_TIMEOUT_MINUTES` | Timeout for a single engine pull | `360` | No |
+
+```bash
+# One public channel URL per line; blank lines and # comments are ignored
+$EDITOR "${DATA_DIR:-./data}/ytdl-sub/channels.txt"
+
+# Enable auto-download and set the cadence on the Subscriptions page
+open http://localhost:8080/subscriptions
+```
+
+Videos land in `${DATA_DIR:-./data}/library/<Channel>/Season <Year>/`. The engine
+pulls only the last 7 days per run; every added file is recorded on the
+Subscriptions page.
+
 ### Example Configuration
 
 ```bash
@@ -298,6 +321,10 @@ Before deploying to production, ensure the following requirements are met:
   # OR
   curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
   chmod a+rx /usr/local/bin/yt-dlp
+  ```
+- **ytdl-sub**: Subscription engine, required only for subscription pulls
+  ```bash
+  pipx install ytdl-sub
   ```
 - **SQLite**: Version 3.35.0 or higher (for WAL mode support)
 - **Disk Space**: Sufficient storage for downloaded videos (depends on usage)

@@ -371,10 +371,7 @@ fn format_thumbnail(thumbnail: Option(String)) -> String {
   }
 }
 
-fn format_ratings(
-  like_count: Option(Int),
-  view_count: Option(Int),
-) -> String {
+fn format_ratings(like_count: Option(Int), view_count: Option(Int)) -> String {
   let rating_value = case like_count, view_count {
     Some(likes), Some(views) -> {
       case views > 0 {

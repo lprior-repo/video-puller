@@ -426,7 +426,7 @@ pub fn subscriptions_renders_config_form_test() {
   // Check for key form elements
   body |> string.contains("enabled") |> should.be_true()
   body |> string.contains("poll_interval") |> should.be_true()
-  body |> string.contains("browser") |> should.be_true()
+  body |> string.contains("ytdl-sub") |> should.be_true()
   body |> string.contains("Subscriptions") |> should.be_true()
 
   cleanup_test_db(conn, "subscriptions_get")

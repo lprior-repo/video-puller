@@ -108,7 +108,9 @@ pub fn parse_enhanced_progress(
 }
 
 /// Parse partial progress (when not all fields are available)
-fn parse_partial_progress(line: String) -> Result(EnhancedProgressInfo, String) {
+fn parse_partial_progress(
+  line: String,
+) -> Result(EnhancedProgressInfo, String) {
   // Try simpler pattern: [download]  45.3% of  100.00MiB
   let simple_pattern = "\\[download\\]\\s+(\\d+(?:\\.\\d+)?)%\\s+of\\s+(\\S+)"
 

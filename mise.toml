@@ -1,0 +1,6 @@
+[tools]
+erlang = "28.0.2"
+gleam = "1.19.1"
+"pipx:ytdl-sub" = "latest"
+python = "3.11.15"
+rebar = "3"

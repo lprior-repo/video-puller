@@ -7,6 +7,7 @@ import domain/core_types.{Completed, Failed}
 import domain/subscription_types.{type SubscriptionStatus}
 import domain/types
 import engine/shell
+import engine/ytdl_sub
 import engine/ytdlp
 import gleam/erlang/process
 import gleam/http/request
@@ -663,7 +664,12 @@ pub fn subscriptions(_req: Request, ctx: Context) -> Response {
 
   templates.layout(
     "Subscriptions",
-    templates.subscriptions_page(config, status, recent_videos),
+    templates.subscriptions_page(
+      config,
+      status,
+      recent_videos,
+      ytdl_sub.layout_from_env().library_dir,
+    ),
   )
   |> html_response(200, _)
 }
@@ -675,24 +681,7 @@ pub fn update_subscription_config(req: Request, ctx: Context) -> Response {
   // Parse form values
   let enabled = get_form_bool(form_data.values, "enabled")
   let poll_interval =
-    get_form_int(form_data.values, "poll_interval_minutes", 60)
-  let browser =
-    get_form_string(form_data.values, "browser", "chromium")
-    |> subscription_types.string_to_browser
-  let max_age_days = get_form_int(form_data.values, "max_age_days", 7)
-  let min_duration = get_form_int(form_data.values, "min_duration_seconds", 120)
-  let max_duration_str =
-    get_form_string(form_data.values, "max_duration_seconds", "")
-  let max_duration = case int.parse(max_duration_str) {
-    Ok(d) if d > 0 -> Some(d)
-    _ -> None
-  }
-  let keyword_filter =
-    get_form_string(form_data.values, "keyword_filter", "")
-    |> parse_comma_list
-  let keyword_exclude =
-    get_form_string(form_data.values, "keyword_exclude", "")
-    |> parse_comma_list
+    get_form_int(form_data.values, "poll_interval_minutes", 360)
 
   // Get existing config to preserve last_poll_at
   let existing = case subscription_repo.get_config(ctx.db) {
@@ -704,13 +693,6 @@ pub fn update_subscription_config(req: Request, ctx: Context) -> Response {
     subscription_types.SubscriptionConfig(
       enabled: enabled,
       poll_interval_minutes: poll_interval,
-      browser: browser,
-      cookies_path: existing.cookies_path,
-      max_age_days: max_age_days,
-      min_duration_seconds: min_duration,
-      max_duration_seconds: max_duration,
-      keyword_filter: keyword_filter,
-      keyword_exclude: keyword_exclude,
       last_poll_at: existing.last_poll_at,
     )
 
@@ -825,17 +807,5 @@ fn get_form_string(
   case list.find(values, fn(pair) { pair.0 == key }) {
     Ok(#(_, value)) -> string.trim(value)
     Error(_) -> default
-  }
-}
-
-/// Parse comma-separated list into List(String)
-fn parse_comma_list(s: String) -> List(String) {
-  case string.is_empty(string.trim(s)) {
-    True -> []
-    False ->
-      s
-      |> string.split(",")
-      |> list.map(string.trim)
-      |> list.filter(fn(item) { !string.is_empty(item) })
   }
 }

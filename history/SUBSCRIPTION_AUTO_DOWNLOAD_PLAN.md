@@ -1,5 +1,11 @@
 # YouTube Subscription Auto-Download Feature Plan
 
+> **Superseded (2026-10-08):** subscriptions now run through `ytdl-sub` over
+> public channel URLs listed in `${DATA_DIR}/ytdl-sub/channels.txt`. The
+> browser-cookie feed reader, session filters and per-channel overrides
+> described below were removed; see `README.md` §"Subscription Pulls" and
+> `src/engine/ytdl_sub.gleam` for the current design. Kept as history.
+
 ## Overview
 
 Add automatic downloading of videos from YouTube subscriptions using yt-dlp cookies authentication, with configurable filtering (age, duration, keywords) and both automatic polling and manual refresh capabilities.

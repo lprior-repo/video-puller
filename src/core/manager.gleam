@@ -373,7 +373,10 @@ fn poll_and_dispatch(state: ManagerState) -> ManagerState {
 
 /// Fallback dispatch when worker pool isn't available
 /// Uses process.spawn() but should rarely be needed
-fn fallback_dispatch(state: ManagerState, available_slots: Int) -> ManagerState {
+fn fallback_dispatch(
+  state: ManagerState,
+  available_slots: Int,
+) -> ManagerState {
   case state.self {
     None -> state
     Some(self) -> {

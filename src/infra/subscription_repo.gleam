@@ -7,12 +7,11 @@ import cake/select
 import cake/update
 import cake/where
 import domain/subscription_types.{
-  type ChannelSettings, type DiscoveredVideo, type SeenVideo,
-  type SubscriptionConfig, ChannelSettings, SeenVideo, SubscriptionConfig,
+  type DiscoveredVideo, type SeenVideo, type SubscriptionConfig, SeenVideo,
+  SubscriptionConfig,
 }
 import gleam/dynamic/decode
 import gleam/int
-import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -24,11 +23,7 @@ pub fn get_config(conn: Db) -> Result(SubscriptionConfig, DbError) {
   let query =
     select.new()
     |> select.from_table("subscription_config")
-    |> select.select_cols([
-      "enabled", "poll_interval_minutes", "browser", "cookies_path",
-      "max_age_days", "min_duration_seconds", "max_duration_seconds",
-      "keyword_filter", "keyword_exclude", "last_poll_at",
-    ])
+    |> select.select_cols(["enabled", "poll_interval_minutes", "last_poll_at"])
     |> select.where(where.eq(where.col("id"), where.int(1)))
     |> select.to_query()
 
@@ -51,9 +46,6 @@ pub fn update_config(
     False -> 0
   }
 
-  let keyword_filter_json = encode_string_list(config.keyword_filter)
-  let keyword_exclude_json = encode_string_list(config.keyword_exclude)
-
   let base_query =
     update.new()
     |> update.table("subscription_config")
@@ -62,37 +54,13 @@ pub fn update_config(
       "poll_interval_minutes",
       config.poll_interval_minutes,
     ))
-    |> update.set(update.set_string(
-      "browser",
-      subscription_types.browser_to_string(config.browser),
-    ))
-    |> update.set(update.set_int("max_age_days", config.max_age_days))
-    |> update.set(update.set_int(
-      "min_duration_seconds",
-      config.min_duration_seconds,
-    ))
-    |> update.set(update.set_string("keyword_filter", keyword_filter_json))
-    |> update.set(update.set_string("keyword_exclude", keyword_exclude_json))
     |> update.set(update.set_int("updated_at", updated_at))
     |> update.where(where.eq(where.col("id"), where.int(1)))
 
-  let with_cookies = case config.cookies_path {
-    Some(path) ->
-      update.set(base_query, update.set_string("cookies_path", path))
-    None -> update.set(base_query, update.set_null("cookies_path"))
-  }
-
-  let with_max_duration = case config.max_duration_seconds {
-    Some(d) ->
-      update.set(with_cookies, update.set_int("max_duration_seconds", d))
-    None -> update.set(with_cookies, update.set_null("max_duration_seconds"))
-  }
-
   let query =
     case config.last_poll_at {
-      Some(ts) ->
-        update.set(with_max_duration, update.set_int("last_poll_at", ts))
-      None -> update.set(with_max_duration, update.set_null("last_poll_at"))
+      Some(ts) -> update.set(base_query, update.set_int("last_poll_at", ts))
+      None -> update.set(base_query, update.set_null("last_poll_at"))
     }
     |> update.to_query()
 
@@ -250,73 +218,6 @@ pub fn list_seen_videos(
   db.run_read(conn, query, seen_video_decoder())
 }
 
-/// Get channel settings override
-pub fn get_channel_settings(
-  conn: Db,
-  channel_id: String,
-) -> Result(Option(ChannelSettings), DbError) {
-  let query =
-    select.new()
-    |> select.from_table("channel_settings")
-    |> select.select_cols([
-      "channel_id", "channel_name", "enabled", "priority", "max_age_days",
-      "min_duration_seconds", "max_duration_seconds", "keyword_filter",
-      "keyword_exclude",
-    ])
-    |> select.where(where.eq(where.col("channel_id"), where.string(channel_id)))
-    |> select.to_query()
-
-  use rows <- result.try(db.run_read(conn, query, channel_settings_decoder()))
-
-  case list.first(rows) {
-    Ok(settings) -> Ok(Some(settings))
-    Error(_) -> Ok(None)
-  }
-}
-
-/// Save or update channel settings
-/// Uses raw SQL for INSERT OR REPLACE as Cake doesn't have direct SQLite upsert support
-pub fn upsert_channel_settings(
-  conn: Db,
-  settings: ChannelSettings,
-  timestamp: Int,
-) -> Result(Nil, DbError) {
-  let enabled_int = case settings.enabled {
-    True -> "1"
-    False -> "0"
-  }
-
-  let sql =
-    "INSERT OR REPLACE INTO channel_settings "
-    <> "(channel_id, channel_name, enabled, priority, max_age_days, "
-    <> "min_duration_seconds, max_duration_seconds, keyword_filter, "
-    <> "keyword_exclude, created_at, updated_at) VALUES ("
-    <> escape_string(settings.channel_id)
-    <> ", "
-    <> escape_string(settings.channel_name)
-    <> ", "
-    <> enabled_int
-    <> ", "
-    <> int.to_string(settings.priority)
-    <> ", "
-    <> option_to_sql_int(settings.max_age_days)
-    <> ", "
-    <> option_to_sql_int(settings.min_duration_seconds)
-    <> ", "
-    <> option_to_sql_int(settings.max_duration_seconds)
-    <> ", "
-    <> escape_string(encode_string_list(settings.keyword_filter))
-    <> ", "
-    <> escape_string(encode_string_list(settings.keyword_exclude))
-    <> ", "
-    <> int.to_string(timestamp)
-    <> ", "
-    <> int.to_string(timestamp)
-    <> ")"
-
-  db.exec_raw(conn, sql)
-}
-
 /// Count total seen videos
 pub fn count_seen_videos(conn: Db) -> Result(Int, DbError) {
   let query =
@@ -355,31 +256,11 @@ pub fn count_downloaded(conn: Db) -> Result(Int, DbError) {
 fn config_decoder() -> decode.Decoder(SubscriptionConfig) {
   use enabled <- decode.then(decode.at([0], decode.int))
   use poll_interval <- decode.then(decode.at([1], decode.int))
-  use browser <- decode.then(decode.at([2], decode.string))
-  use cookies_path <- decode.then(decode.at([3], decode.optional(decode.string)))
-  use max_age_days <- decode.then(decode.at([4], decode.int))
-  use min_duration <- decode.then(decode.at([5], decode.int))
-  use max_duration <- decode.then(decode.at([6], decode.optional(decode.int)))
-  use keyword_filter <- decode.then(decode.at(
-    [7],
-    decode.optional(decode.string),
-  ))
-  use keyword_exclude <- decode.then(decode.at(
-    [8],
-    decode.optional(decode.string),
-  ))
-  use last_poll_at <- decode.then(decode.at([9], decode.optional(decode.int)))
+  use last_poll_at <- decode.then(decode.at([2], decode.optional(decode.int)))
 
   decode.success(SubscriptionConfig(
     enabled: enabled == 1,
     poll_interval_minutes: poll_interval,
-    browser: subscription_types.string_to_browser(browser),
-    cookies_path: cookies_path,
-    max_age_days: max_age_days,
-    min_duration_seconds: min_duration,
-    max_duration_seconds: max_duration,
-    keyword_filter: decode_string_list(keyword_filter),
-    keyword_exclude: decode_string_list(keyword_exclude),
     last_poll_at: last_poll_at,
   ))
 }
@@ -416,36 +297,6 @@ fn seen_video_decoder() -> decode.Decoder(SeenVideo) {
   ))
 }
 
-fn channel_settings_decoder() -> decode.Decoder(ChannelSettings) {
-  use channel_id <- decode.then(decode.at([0], decode.string))
-  use channel_name <- decode.then(decode.at([1], decode.string))
-  use enabled <- decode.then(decode.at([2], decode.int))
-  use priority <- decode.then(decode.at([3], decode.int))
-  use max_age_days <- decode.then(decode.at([4], decode.optional(decode.int)))
-  use min_duration <- decode.then(decode.at([5], decode.optional(decode.int)))
-  use max_duration <- decode.then(decode.at([6], decode.optional(decode.int)))
-  use keyword_filter <- decode.then(decode.at(
-    [7],
-    decode.optional(decode.string),
-  ))
-  use keyword_exclude <- decode.then(decode.at(
-    [8],
-    decode.optional(decode.string),
-  ))
-
-  decode.success(ChannelSettings(
-    channel_id: channel_id,
-    channel_name: channel_name,
-    enabled: enabled == 1,
-    priority: priority,
-    max_age_days: max_age_days,
-    min_duration_seconds: min_duration,
-    max_duration_seconds: max_duration,
-    keyword_filter: decode_string_list(keyword_filter),
-    keyword_exclude: decode_string_list(keyword_exclude),
-  ))
-}
-
 // SQL Helpers
 
 fn escape_string(s: String) -> String {
@@ -463,36 +314,5 @@ fn option_to_sql_int(opt: Option(Int)) -> String {
   case opt {
     Some(n) -> int.to_string(n)
     None -> "NULL"
-  }
-}
-
-fn encode_string_list(items: List(String)) -> String {
-  case items {
-    [] -> ""
-    _ -> json.to_string(json.array(items, json.string))
-  }
-}
-
-fn decode_string_list(json_str: Option(String)) -> List(String) {
-  case json_str {
-    None -> []
-    Some("") -> []
-    Some(s) -> {
-      case string.starts_with(s, "[") && string.ends_with(s, "]") {
-        True -> {
-          s
-          |> string.drop_start(1)
-          |> string.drop_end(1)
-          |> string.split(",")
-          |> list.map(fn(item) {
-            item
-            |> string.trim
-            |> string.replace("\"", "")
-          })
-          |> list.filter(fn(item) { !string.is_empty(item) })
-        }
-        False -> []
-      }
-    }
   }
 }

@@ -1,19 +1,15 @@
 /// Integration tests for the subscription system
 ///
-/// Tests the complete subscription flow including:
-/// - Subscription manager actor lifecycle
-/// - Config updates and persistence
-/// - Video filtering and job creation
-/// - Status reporting
+/// Covers the retained flow: the manager actor lifecycle, config persistence,
+/// library records derived from engine output, and the direct-download job
+/// queue.
 import core/subscription_manager
-import domain/subscription_types.{
-  type DiscoveredVideo, Chromium, DiscoveredVideo, PassedFilter,
-  SkippedExcludedKeyword, SkippedNoKeywordMatch, SkippedTooOld, SkippedTooShort,
-  SubscriptionConfig,
-}
-import engine/video_filter
+import domain/core_types
+import domain/subscription_types.{SubscriptionConfig}
+import engine/ytdl_sub
 import gleam/erlang/process
-import gleam/option.{None, Some}
+import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleeunit
 import gleeunit/should
 import infra/db
@@ -56,21 +52,17 @@ fn cleanup_test_db(conn: db.Db, test_name: String) {
 fn test_video(
   id: String,
   title: String,
-  duration: option.Option(Int),
-  age_days: Int,
-) -> DiscoveredVideo {
-  let now = get_timestamp()
-  let published = now - age_days * 86_400
-
-  DiscoveredVideo(
+  duration: Option(Int),
+) -> subscription_types.DiscoveredVideo {
+  subscription_types.DiscoveredVideo(
     video_id: id,
-    channel_id: Some("channel-123"),
+    channel_id: None,
     channel_name: Some("Test Channel"),
     title: title,
-    url: "https://www.youtube.com/watch?v=" <> id,
-    published_at: Some(published),
+    url: "file:///library/Test Channel/" <> id <> ".mp4",
+    published_at: None,
     duration_seconds: duration,
-    thumbnail_url: Some("https://img.youtube.com/" <> id),
+    thumbnail_url: None,
   )
 }
 
@@ -90,28 +82,26 @@ fn get_system_time(unit: TimeUnit) -> Int
 // Subscription Manager Tests
 // =============================================================================
 
-/// Test that subscription manager starts correctly
+/// Test that the subscription manager starts and reports status
 pub fn subscription_manager_start_test() {
   let conn = setup_test_db("manager_start")
 
   case subscription_manager.start(conn) {
     Ok(subject) -> {
-      // Manager should start successfully
-      // Send a status request to verify it's alive
       let reply = process.new_subject()
       process.send(subject, subscription_manager.GetStatus(reply))
 
       case process.receive(reply, 1000) {
         Ok(status) -> {
-          // Default config should have subscriptions disabled
+          // Default config has subscriptions disabled
           status.enabled |> should.be_false()
           status.is_polling |> should.be_false()
         }
         Error(_) -> should.fail()
       }
 
-      // Shutdown the manager
       process.send(subject, subscription_manager.Shutdown)
+      process.sleep(50)
     }
     Error(_) -> should.fail()
   }
@@ -119,45 +109,37 @@ pub fn subscription_manager_start_test() {
   cleanup_test_db(conn, "manager_start")
 }
 
-/// Test that config updates are propagated to the manager
+/// Test that config updates are propagated to the manager and persisted
 pub fn subscription_manager_config_update_test() {
   let conn = setup_test_db("manager_config")
 
   case subscription_manager.start(conn) {
     Ok(subject) -> {
-      // Create a new config
       let new_config =
         SubscriptionConfig(
           enabled: True,
-          poll_interval_minutes: 30,
-          browser: Chromium,
-          cookies_path: None,
-          max_age_days: 3,
-          min_duration_seconds: 60,
-          max_duration_seconds: Some(3600),
-          keyword_filter: ["tutorial", "guide"],
-          keyword_exclude: ["shorts", "ad"],
+          poll_interval_minutes: 360,
           last_poll_at: None,
         )
 
-      // Send config update
       process.send(subject, subscription_manager.UpdateConfig(new_config))
-
-      // Give it a moment to process
       process.sleep(100)
 
-      // Check status
       let reply = process.new_subject()
       process.send(subject, subscription_manager.GetStatus(reply))
 
       case process.receive(reply, 1000) {
-        Ok(status) -> {
-          status.enabled |> should.be_true()
-        }
+        Ok(status) -> status.enabled |> should.be_true()
+        Error(_) -> should.fail()
+      }
+
+      case subscription_repo.get_config(conn) {
+        Ok(persisted) -> persisted.enabled |> should.be_true()
         Error(_) -> should.fail()
       }
 
       process.send(subject, subscription_manager.Shutdown)
+      process.sleep(50)
     }
     Error(_) -> should.fail()
   }
@@ -165,86 +147,46 @@ pub fn subscription_manager_config_update_test() {
   cleanup_test_db(conn, "manager_config")
 }
 
-// =============================================================================
-// Video Filter Integration Tests
-// =============================================================================
+/// Test config persistence roundtrip
+pub fn config_persistence_test() {
+  let conn = setup_test_db("config_persist")
+  let timestamp = get_timestamp()
 
-/// Test complete video filtering flow
-pub fn video_filter_integration_test() {
   let config =
     SubscriptionConfig(
       enabled: True,
-      poll_interval_minutes: 60,
-      browser: Chromium,
-      cookies_path: None,
-      max_age_days: 7,
-      min_duration_seconds: 120,
-      max_duration_seconds: Some(7200),
-      keyword_filter: ["tutorial", "guide", "how to"],
-      keyword_exclude: ["shorts", "ad", "sponsored"],
-      last_poll_at: None,
+      poll_interval_minutes: 720,
+      last_poll_at: Some(timestamp - 3600),
     )
 
-  let now = get_timestamp()
+  case subscription_repo.update_config(conn, config, timestamp) {
+    Ok(_) -> Nil
+    Error(_) -> should.fail()
+  }
 
-  // Video that should pass all filters
-  let good_video =
-    test_video("good1", "How to Build a Web App Tutorial", Some(1800), 2)
-
-  case video_filter.should_download(good_video, config, None, now) {
-    PassedFilter -> Nil
-    _other -> {
-      should.fail()
+  case subscription_repo.get_config(conn) {
+    Ok(loaded) -> {
+      loaded.enabled |> should.be_true()
+      loaded.poll_interval_minutes |> should.equal(720)
+      loaded.last_poll_at |> should.equal(Some(timestamp - 3600))
     }
+    Error(_) -> should.fail()
   }
 
-  // Video too short
-  let short_video = test_video("short1", "Quick Tutorial Guide", Some(60), 1)
-
-  case video_filter.should_download(short_video, config, None, now) {
-    SkippedTooShort -> Nil
-    _ -> should.fail()
-  }
-
-  // Video too old
-  let old_video = test_video("old1", "Old Tutorial Guide", Some(600), 14)
-
-  case video_filter.should_download(old_video, config, None, now) {
-    SkippedTooOld -> Nil
-    _ -> should.fail()
-  }
-
-  // Video with excluded keyword
-  let sponsored_video =
-    test_video("sponsored1", "Sponsored Tutorial Guide", Some(600), 1)
-
-  case video_filter.should_download(sponsored_video, config, None, now) {
-    SkippedExcludedKeyword(_) -> Nil
-    _ -> should.fail()
-  }
-
-  // Video without any keywords
-  let no_match_video =
-    test_video("nomatch1", "Random Video Content", Some(600), 1)
-
-  case video_filter.should_download(no_match_video, config, None, now) {
-    SkippedNoKeywordMatch -> Nil
-    _ -> should.fail()
-  }
+  cleanup_test_db(conn, "config_persist")
 }
 
 // =============================================================================
-// Subscription Repo Integration Tests
+// Seen Video Tracking Tests
 // =============================================================================
 
-/// Test seen video tracking and job creation
+/// Test download record tracking
 pub fn seen_video_tracking_test() {
   let conn = setup_test_db("seen_tracking")
 
-  let video = test_video("track1", "Test Video Tutorial", Some(600), 1)
+  let video = test_video("track1", "Test Video", Some(600))
   let timestamp = get_timestamp()
 
-  // Mark as seen
   case
     subscription_repo.mark_seen(
       conn,
@@ -259,13 +201,11 @@ pub fn seen_video_tracking_test() {
     Error(_) -> should.fail()
   }
 
-  // Check it's now seen
   case subscription_repo.is_seen(conn, "track1") {
     Ok(True) -> Nil
     _ -> should.fail()
   }
 
-  // Retrieve the seen video
   case subscription_repo.get_seen_video(conn, "track1") {
     Ok(Some(seen)) -> {
       seen.video_id |> should.equal("track1")
@@ -278,94 +218,131 @@ pub fn seen_video_tracking_test() {
   cleanup_test_db(conn, "seen_tracking")
 }
 
-/// Test skipped video tracking
-pub fn skipped_video_tracking_test() {
-  let conn = setup_test_db("skip_tracking")
+/// Test that re-recording the same video does not duplicate rows
+pub fn mark_seen_idempotency_test() {
+  let conn = setup_test_db("seen_idempotent")
 
-  let video = test_video("skip1", "Too Short Video", Some(30), 1)
+  let video = test_video("idem1", "Repeat Video", Some(600))
   let timestamp = get_timestamp()
 
-  // Mark as skipped
+  case subscription_repo.mark_seen(conn, video, True, None, None, timestamp) {
+    Ok(_) -> Nil
+    Error(_) -> should.fail()
+  }
+
   case
-    subscription_repo.mark_seen(
-      conn,
-      video,
-      False,
-      Some("Video too short"),
-      None,
-      timestamp,
-    )
+    subscription_repo.mark_seen(conn, video, True, None, None, timestamp + 60)
   {
     Ok(_) -> Nil
     Error(_) -> should.fail()
   }
 
-  // Retrieve and verify
-  case subscription_repo.get_seen_video(conn, "skip1") {
+  case subscription_repo.count_seen_videos(conn) {
+    Ok(count) -> count |> should.equal(1)
+    Error(_) -> should.fail()
+  }
+
+  cleanup_test_db(conn, "seen_idempotent")
+}
+
+// =============================================================================
+// Engine Output Mapping Tests
+// =============================================================================
+
+/// Test that engine library files map to library records
+pub fn engine_added_files_recorded_test() {
+  let conn = setup_test_db("engine_records")
+  let library_dir = "/tmp/test_subscription_library"
+
+  let _ = simplifile.create_directory_all(library_dir <> "/Chan A")
+  let _ = simplifile.create_directory_all(library_dir <> "/Chan B")
+
+  let video_one = library_dir <> "/Chan A/s2026.e091101 - Video One.mp4"
+  let sidecar_one = library_dir <> "/Chan A/s2026.e091101 - Video One.info.json"
+  let video_two = library_dir <> "/Chan B/Video Two.mkv"
+  let thumb_two = library_dir <> "/Chan B/Video Two.jpg"
+
+  let _ = simplifile.write(video_one, "video")
+  let _ = simplifile.write(sidecar_one, "{}")
+  let _ = simplifile.write(video_two, "video")
+  let _ = simplifile.write(thumb_two, "image")
+
+  // Only the media files are reported as downloads
+  let added_files = [video_one, video_two]
+  let timestamp = get_timestamp()
+
+  list.each(added_files, fn(path) {
+    let video = ytdl_sub.to_discovered_video(library_dir, path)
+    let _ =
+      subscription_repo.mark_seen(conn, video, True, None, None, timestamp)
+    Nil
+  })
+
+  case subscription_repo.count_downloaded(conn) {
+    Ok(count) -> count |> should.equal(2)
+    Error(_) -> should.fail()
+  }
+
+  case
+    subscription_repo.get_seen_video(
+      conn,
+      "Chan A/s2026.e091101 - Video One.mp4",
+    )
+  {
     Ok(Some(seen)) -> {
-      seen.video_id |> should.equal("skip1")
-      seen.downloaded |> should.be_false()
-      seen.skipped |> should.be_true()
-      seen.skip_reason |> should.equal(Some("Video too short"))
+      seen.channel_name |> should.equal(Some("Chan A"))
+      seen.title |> should.equal("Video One")
+      // 2026-09-11 as a Unix timestamp
+      seen.published_at |> should.equal(Some(1_789_084_800))
     }
     _ -> should.fail()
   }
 
-  cleanup_test_db(conn, "skip_tracking")
-}
-
-/// Test config persistence
-pub fn config_persistence_test() {
-  let conn = setup_test_db("config_persist")
-  let timestamp = get_timestamp()
-
-  let config =
-    SubscriptionConfig(
-      enabled: True,
-      poll_interval_minutes: 45,
-      browser: Chromium,
-      cookies_path: Some("/path/to/cookies.txt"),
-      max_age_days: 5,
-      min_duration_seconds: 180,
-      max_duration_seconds: Some(5400),
-      keyword_filter: ["gleam", "erlang", "beam"],
-      keyword_exclude: ["java", "python"],
-      last_poll_at: Some(timestamp - 3600),
-    )
-
-  // Save config
-  case subscription_repo.update_config(conn, config, timestamp) {
-    Ok(_) -> Nil
-    Error(_) -> should.fail()
-  }
-
-  // Retrieve and verify
-  case subscription_repo.get_config(conn) {
-    Ok(loaded) -> {
-      loaded.enabled |> should.be_true()
-      loaded.poll_interval_minutes |> should.equal(45)
-      loaded.max_age_days |> should.equal(5)
-      loaded.min_duration_seconds |> should.equal(180)
-      loaded.keyword_filter |> should.equal(["gleam", "erlang", "beam"])
-      loaded.keyword_exclude |> should.equal(["java", "python"])
+  case subscription_repo.get_seen_video(conn, "Chan B/Video Two.mkv") {
+    Ok(Some(seen)) -> {
+      seen.title |> should.equal("Video Two")
+      seen.duration_seconds |> should.equal(None)
     }
+    _ -> should.fail()
+  }
+
+  // Re-recording the same files leaves the library size unchanged
+  list.each(added_files, fn(path) {
+    let video = ytdl_sub.to_discovered_video(library_dir, path)
+    let _ =
+      subscription_repo.mark_seen(conn, video, True, None, None, timestamp + 60)
+    Nil
+  })
+
+  case subscription_repo.list_seen_videos(conn, 50, 0) {
+    Ok(seen) -> list.length(seen) |> should.equal(2)
     Error(_) -> should.fail()
   }
 
-  cleanup_test_db(conn, "config_persist")
+  let _ = simplifile.delete(video_one)
+  let _ = simplifile.delete(sidecar_one)
+  let _ = simplifile.delete(video_two)
+  let _ = simplifile.delete(thumb_two)
+  let _ = simplifile.delete(library_dir <> "/Chan A")
+  let _ = simplifile.delete(library_dir <> "/Chan B")
+  let _ = simplifile.delete(library_dir)
+
+  cleanup_test_db(conn, "engine_records")
 }
 
-/// Test job creation from subscription
+// =============================================================================
+// Direct Download Job Queue Tests
+// =============================================================================
+
+/// Test that a manual download job can reference a library record
 pub fn job_from_subscription_test() {
   let conn = setup_test_db("job_create")
 
-  let video = test_video("job1", "Tutorial on BEAM", Some(1200), 1)
+  let video = test_video("job1", "Tutorial on BEAM", Some(1200))
   let timestamp = get_timestamp()
 
-  // Create a job ID
   let job_id = "sub-job-" <> video.video_id
 
-  // Insert the job
   case
     repo.insert_job(conn, core_types.new_job_id(job_id), video.url, timestamp)
   {
@@ -373,7 +350,6 @@ pub fn job_from_subscription_test() {
     Error(_) -> should.fail()
   }
 
-  // Mark video as seen with job reference
   case
     subscription_repo.mark_seen(
       conn,
@@ -388,116 +364,10 @@ pub fn job_from_subscription_test() {
     Error(_) -> should.fail()
   }
 
-  // Verify job exists
   case repo.get_job(conn, core_types.new_job_id(job_id)) {
-    Ok(Some(job)) -> {
-      job.url |> should.equal(video.url)
-    }
+    Ok(Some(job)) -> job.url |> should.equal(video.url)
     _ -> should.fail()
   }
 
   cleanup_test_db(conn, "job_create")
 }
-
-// =============================================================================
-// End-to-End Flow Tests
-// =============================================================================
-
-/// Test complete subscription poll simulation
-pub fn complete_poll_simulation_test() {
-  let conn = setup_test_db("poll_sim")
-
-  let config =
-    SubscriptionConfig(
-      enabled: True,
-      poll_interval_minutes: 60,
-      browser: Chromium,
-      cookies_path: None,
-      max_age_days: 7,
-      min_duration_seconds: 120,
-      max_duration_seconds: None,
-      keyword_filter: [],
-      keyword_exclude: ["shorts"],
-      last_poll_at: None,
-    )
-
-  let timestamp = get_timestamp()
-
-  // Simulate discovered videos
-  let videos = [
-    test_video("poll1", "Great Video Content", Some(600), 1),
-    test_video("poll2", "Another Good Video", Some(900), 2),
-    test_video("poll3", "Shorts Video Quick", Some(30), 1),
-    test_video("poll4", "Old Video Content", Some(600), 14),
-  ]
-
-  // Process each video like the subscription manager would
-  let _results =
-    videos
-    |> list.map(fn(video) {
-      let filter_result =
-        video_filter.should_download(video, config, None, timestamp)
-
-      case filter_result {
-        PassedFilter -> {
-          let job_id = "poll-job-" <> video.video_id
-          let _ =
-            repo.insert_job(
-              conn,
-              core_types.new_job_id(job_id),
-              video.url,
-              timestamp,
-            )
-          let _ =
-            subscription_repo.mark_seen(
-              conn,
-              video,
-              True,
-              None,
-              Some(job_id),
-              timestamp,
-            )
-          #(video.video_id, "queued")
-        }
-        other -> {
-          let reason = subscription_types.filter_result_to_string(other)
-          let _ =
-            subscription_repo.mark_seen(
-              conn,
-              video,
-              False,
-              Some(reason),
-              None,
-              timestamp,
-            )
-          #(video.video_id, "skipped: " <> reason)
-        }
-      }
-    })
-
-  // Verify results
-  // poll1 and poll2 should be queued (pass all filters with empty keyword_filter)
-  // poll3 should be skipped (too short)
-  // poll4 should be skipped (too old)
-
-  // Check jobs were created for poll1 and poll2
-  case repo.list_jobs(conn, None) {
-    Ok(jobs) -> {
-      list.length(jobs) |> should.equal(2)
-    }
-    Error(_) -> should.fail()
-  }
-
-  // Check all videos are marked as seen
-  case subscription_repo.list_seen_videos(conn, 10, 0) {
-    Ok(seen) -> {
-      list.length(seen) |> should.equal(4)
-    }
-    Error(_) -> should.fail()
-  }
-
-  cleanup_test_db(conn, "poll_sim")
-}
-
-import domain/core_types
-import gleam/list

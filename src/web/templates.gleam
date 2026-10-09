@@ -10,7 +10,6 @@ import domain/subscription_types.{
   type SubscriptionStatus,
 }
 import domain/types.{type VideoJob}
-import engine/video_filter
 import engine/ytdlp
 import gleam/int
 import gleam/list
@@ -1451,14 +1450,28 @@ pub fn subscriptions_page(
   config: SubscriptionConfig,
   status: SubscriptionStatus,
   recent_videos: List(SeenVideo),
+  library_dir: String,
 ) -> Element(a) {
   div([], [
     h2([class("text-2xl font-bold mb-6")], [text("YouTube Subscriptions")]),
     // Status banner
     subscription_status_banner(status),
+    // Engine library location
+    div([class("settings-section")], [
+      html.h3([], [text("Library")]),
+      p([class("text-gray-400")], [
+        text("Downloaded videos are written by ytdl-sub to: "),
+        span([class("path")], [text(library_dir)]),
+      ]),
+      p([class("text-sm text-gray-400 mt-2")], [
+        text(
+          "Subscription channels are listed in channels.txt beside that folder. Fetches are sequential and use no browser cookies.",
+        ),
+      ]),
+    ]),
     // Settings form
     subscription_settings_form(config),
-    // Recent discoveries
+    // Recent downloads
     subscription_feed_list(recent_videos),
   ])
 }
@@ -1525,16 +1538,22 @@ fn subscription_status_banner(status: SubscriptionStatus) -> Element(a) {
 
 /// Poll result summary
 fn poll_result_summary(result: PollResult) -> Element(a) {
+  let error_text = case result.errors {
+    [] -> ""
+    errors ->
+      ", "
+      <> int.to_string(list.length(errors))
+      <> " error(s): "
+      <> string.join(errors, "; ")
+  }
+
   div([class("mt-2 text-sm")], [
     span([class("text-gray-400")], [
       text(
-        "Last result: "
+        "Last poll: "
         <> int.to_string(result.total_found)
-        <> " found, "
-        <> int.to_string(result.queued_for_download)
-        <> " queued, "
-        <> int.to_string(result.skipped)
-        <> " skipped",
+        <> " downloaded"
+        <> error_text,
       ),
     ]),
   ])
@@ -1555,7 +1574,9 @@ fn subscription_settings_form(config: SubscriptionConfig) -> Element(a) {
           div([], [
             div([class("setting-label")], [text("Enable Auto-Download")]),
             div([class("setting-description")], [
-              text("Automatically download new videos from your subscriptions"),
+              text(
+                "Run the ytdl-sub engine over the configured channels and download new videos",
+              ),
             ]),
           ]),
           html.label([class("toggle-switch")], [
@@ -1631,161 +1652,6 @@ fn subscription_settings_form(config: SubscriptionConfig) -> Element(a) {
             ),
           ]),
         ]),
-        // Browser for cookies
-        div([class("setting-row")], [
-          div([], [
-            div([class("setting-label")], [text("Browser for Cookies")]),
-            div([class("setting-description")], [
-              text(
-                "Browser to extract YouTube login cookies from (must be closed)",
-              ),
-            ]),
-          ]),
-          select([name("browser"), class("setting-input")], [
-            option(
-              [
-                attribute("value", "firefox"),
-                selected_attr(
-                  subscription_types.browser_to_string(config.browser)
-                  == "firefox",
-                ),
-              ],
-              "Firefox",
-            ),
-            option(
-              [
-                attribute("value", "chrome"),
-                selected_attr(
-                  subscription_types.browser_to_string(config.browser)
-                  == "chrome",
-                ),
-              ],
-              "Chrome",
-            ),
-            option(
-              [
-                attribute("value", "chromium"),
-                selected_attr(
-                  subscription_types.browser_to_string(config.browser)
-                  == "chromium",
-                ),
-              ],
-              "Chromium",
-            ),
-            option(
-              [
-                attribute("value", "edge"),
-                selected_attr(
-                  subscription_types.browser_to_string(config.browser) == "edge",
-                ),
-              ],
-              "Edge",
-            ),
-            option(
-              [
-                attribute("value", "brave"),
-                selected_attr(
-                  subscription_types.browser_to_string(config.browser)
-                  == "brave",
-                ),
-              ],
-              "Brave",
-            ),
-          ]),
-        ]),
-      ]),
-      // Filters section
-      div([class("settings-section")], [
-        html.h3([], [text("Filters")]),
-        // Max age
-        div([class("setting-row")], [
-          div([], [
-            div([class("setting-label")], [text("Max Video Age (days)")]),
-            div([class("setting-description")], [
-              text("Only download videos published within this many days"),
-            ]),
-          ]),
-          input([
-            type_("number"),
-            name("max_age_days"),
-            class("setting-input"),
-            attribute("value", int.to_string(config.max_age_days)),
-            attribute("min", "1"),
-            attribute("max", "30"),
-          ]),
-        ]),
-        // Min duration
-        div([class("setting-row")], [
-          div([], [
-            div([class("setting-label")], [text("Minimum Duration (seconds)")]),
-            div([class("setting-description")], [
-              text("Skip videos shorter than this (120s = 2min skips Shorts)"),
-            ]),
-          ]),
-          input([
-            type_("number"),
-            name("min_duration_seconds"),
-            class("setting-input"),
-            attribute("value", int.to_string(config.min_duration_seconds)),
-            attribute("min", "0"),
-          ]),
-        ]),
-        // Max duration
-        div([class("setting-row")], [
-          div([], [
-            div([class("setting-label")], [text("Maximum Duration (seconds)")]),
-            div([class("setting-description")], [
-              text("Skip videos longer than this (0 = no limit)"),
-            ]),
-          ]),
-          input([
-            type_("number"),
-            name("max_duration_seconds"),
-            class("setting-input"),
-            attribute("value", case config.max_duration_seconds {
-              Some(d) -> int.to_string(d)
-              None -> ""
-            }),
-            attribute("min", "0"),
-            placeholder("No limit"),
-          ]),
-        ]),
-        // Keyword filter
-        div([class("setting-row")], [
-          div([], [
-            div([class("setting-label")], [text("Include Keywords")]),
-            div([class("setting-description")], [
-              text(
-                "Only download if title contains any of these (comma-separated, empty = all)",
-              ),
-            ]),
-          ]),
-          input([
-            type_("text"),
-            name("keyword_filter"),
-            class("setting-input"),
-            attribute("value", string.join(config.keyword_filter, ", ")),
-            placeholder("e.g. tutorial, review, gameplay"),
-          ]),
-        ]),
-        // Keyword exclude
-        div([class("setting-row")], [
-          div([], [
-            div([class("setting-label")], [text("Exclude Keywords")]),
-            div([class("setting-description")], [
-              text(
-                "Skip videos if title contains any of these (comma-separated)",
-              ),
-            ]),
-          ]),
-          input([
-            type_("text"),
-            name("keyword_exclude"),
-            class("setting-input"),
-            attribute("value", string.join(config.keyword_exclude, ", ")),
-            placeholder("e.g. sponsored, ad, trailer"),
-          ]),
-        ]),
       ]),
       // Save button
       div([class("mt-4")], [
@@ -1802,15 +1668,15 @@ fn subscription_settings_form(config: SubscriptionConfig) -> Element(a) {
   )
 }
 
-/// Subscription feed list showing recent discoveries
+/// Subscription feed list showing recent downloads
 pub fn subscription_feed_list(videos: List(SeenVideo)) -> Element(a) {
   div([class("settings-section mt-6")], [
-    html.h3([], [text("Recent Discoveries")]),
+    html.h3([], [text("Recent Downloads")]),
     case list.is_empty(videos) {
       True ->
         p([class("text-gray-400")], [
           text(
-            "No videos discovered yet. Enable subscriptions and click Refresh to check for new videos.",
+            "No downloads recorded yet. Enable subscriptions and click Refresh Now to pull the channel list.",
           ),
         ])
       False -> ul([class("list-none")], list.map(videos, seen_video_card))
@@ -1831,7 +1697,7 @@ fn seen_video_card(video: SeenVideo) -> Element(a) {
   }
 
   let duration_text = case video.duration_seconds {
-    Some(d) -> video_filter.format_duration(d)
+    Some(d) -> format_duration(d)
     None -> "Unknown"
   }
 
@@ -1845,19 +1711,43 @@ fn seen_video_card(video: SeenVideo) -> Element(a) {
         div([class("text-sm text-gray-500 mt-2")], [
           span([], [text("Duration: " <> duration_text)]),
           span([class("mx-2")], [text("|")]),
-          a(
-            [
-              href(video.url),
-              attribute("target", "_blank"),
-              class("text-blue-400"),
-            ],
-            [text("View on YouTube")],
-          ),
+          case string.starts_with(video.url, "http") {
+            True ->
+              a(
+                [
+                  href(video.url),
+                  attribute("target", "_blank"),
+                  class("text-blue-400"),
+                ],
+                [text("View on YouTube")],
+              )
+            False -> span([class("text-gray-500")], [text(video.url)])
+          },
         ]),
       ]),
       status_badge_content,
     ]),
   ])
+}
+
+/// Format duration as human-readable string
+fn format_duration(seconds: Int) -> String {
+  let hours = seconds / 3600
+  let remaining = seconds % 3600
+  let minutes = remaining / 60
+  let secs = remaining % 60
+
+  case hours {
+    h if h > 0 -> int.to_string(h) <> ":" <> pad2(minutes) <> ":" <> pad2(secs)
+    _ -> int.to_string(minutes) <> ":" <> pad2(secs)
+  }
+}
+
+fn pad2(n: Int) -> String {
+  case n < 10 {
+    True -> "0" <> int.to_string(n)
+    False -> int.to_string(n)
+  }
 }
 
 /// Helper to add selected attribute conditionally

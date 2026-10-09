@@ -1,0 +1,6 @@
+# Public channel URLs for the subscription engine
+#
+# One URL per line. Blank lines and # comments are ignored.
+# Keep the list short: ytdl-sub fetches these sequentially.
+#
+# https://www.youtube.com/@example-channel

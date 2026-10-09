@@ -1,14 +1,14 @@
 /// Subscription Manager Actor
 ///
-/// OTP actor that manages subscription feed polling lifecycle.
-/// Periodically fetches subscription feed, filters videos, and queues downloads.
+/// OTP actor that owns the subscription download schedule. Each poll runs the
+/// ytdl-sub engine over the configured public channel list, one download at a
+/// time, and records what arrived in the library.
 import domain/subscription_types.{
   type PollResult, type SubscriptionConfig, type SubscriptionStatus, PollResult,
   SubscriptionConfig, SubscriptionStatus,
 }
-import domain/types
-import engine/subscription_feed
-import engine/video_filter
+import engine/ytdl_sub
+import envoy
 import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/io
@@ -17,7 +17,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import infra/db.{type Db}
-import infra/repo
 import infra/subscription_repo
 
 /// Messages the subscription manager can receive
@@ -34,6 +33,8 @@ pub type SubscriptionMessage {
   Shutdown
   /// Internal: store self reference
   SetSelf(Subject(SubscriptionMessage))
+  /// Internal: a background pull finished
+  PollFinished(Result(ytdl_sub.PullSummary, String))
 }
 
 /// Internal state of the subscription manager
@@ -50,7 +51,6 @@ pub opaque type SubscriptionState {
 
 /// Start the subscription manager actor
 pub fn start(db: Db) -> Result(Subject(SubscriptionMessage), actor.StartError) {
-  // Load initial config from database
   let config = case subscription_repo.get_config(db) {
     Ok(c) -> c
     Error(_) -> subscription_types.default_config()
@@ -72,7 +72,6 @@ pub fn start(db: Db) -> Result(Subject(SubscriptionMessage), actor.StartError) {
   )
   |> result.map(fn(started) {
     let subject = started.data
-    // Send self reference for scheduling
     process.send(subject, SetSelf(subject))
     subject
   })
@@ -87,45 +86,13 @@ fn handle_message(
     Poll -> {
       case state.config.enabled, state.is_polling {
         True, False -> {
-          // Start polling
           log_poll_start()
-          let new_state = SubscriptionState(..state, is_polling: True)
-          let poll_result = execute_poll(new_state)
-
-          // Update state with result
-          let timestamp = get_timestamp()
-          let _ = subscription_repo.update_last_poll(state.db, timestamp)
-
-          let finished_state =
-            SubscriptionState(
-              ..new_state,
-              is_polling: False,
-              last_result: Some(poll_result),
-              config: SubscriptionConfig(
-                ..state.config,
-                last_poll_at: Some(timestamp),
-              ),
-            )
-
-          // Log result
-          log_poll_end(
-            poll_result.total_found,
-            poll_result.new_videos,
-            poll_result.queued_for_download,
-            poll_result.skipped,
-          )
-
-          // Schedule next poll
-          case finished_state.self {
+          case state.self {
             Some(self) -> {
-              let next_ts =
-                timestamp + finished_state.config.poll_interval_minutes * 60
-              schedule_poll(self, finished_state.config.poll_interval_minutes)
-              actor.continue(
-                SubscriptionState(..finished_state, next_poll_at: Some(next_ts)),
-              )
+              process.spawn(fn() { run_pull_worker(self) })
+              actor.continue(SubscriptionState(..state, is_polling: True))
             }
-            None -> actor.continue(finished_state)
+            None -> actor.continue(state)
           }
         }
         False, _ -> {
@@ -136,6 +103,64 @@ fn handle_message(
           io.println("Poll already in progress, skipping")
           actor.continue(state)
         }
+      }
+    }
+
+    PollFinished(outcome) -> {
+      let timestamp = get_timestamp()
+      let _ = subscription_repo.update_last_poll(state.db, timestamp)
+
+      let poll_result = case outcome {
+        Ok(summary) -> {
+          record_downloads(state.db, summary.added_files, timestamp)
+          PollResult(
+            total_found: summary.downloaded,
+            new_videos: summary.downloaded,
+            queued_for_download: summary.downloaded,
+            skipped: 0,
+            errors: summary.errors,
+          )
+        }
+        Error(err) -> {
+          io.println("Poll error: " <> err)
+          PollResult(
+            total_found: 0,
+            new_videos: 0,
+            queued_for_download: 0,
+            skipped: 0,
+            errors: [err],
+          )
+        }
+      }
+
+      log_poll_end(
+        poll_result.total_found,
+        poll_result.new_videos,
+        poll_result.queued_for_download,
+        list.length(poll_result.errors),
+      )
+
+      let finished_state =
+        SubscriptionState(
+          ..state,
+          is_polling: False,
+          last_result: Some(poll_result),
+          config: SubscriptionConfig(
+            ..state.config,
+            last_poll_at: Some(timestamp),
+          ),
+        )
+
+      case finished_state.config.enabled, finished_state.self {
+        True, Some(self) -> {
+          let next_ts =
+            timestamp + finished_state.config.poll_interval_minutes * 60
+          schedule_poll(self, finished_state.config.poll_interval_minutes)
+          actor.continue(
+            SubscriptionState(..finished_state, next_poll_at: Some(next_ts)),
+          )
+        }
+        _, _ -> actor.continue(finished_state)
       }
     }
 
@@ -154,7 +179,6 @@ fn handle_message(
     }
 
     UpdateConfig(new_config) -> {
-      // Save to database
       let timestamp = get_timestamp()
       let _ = subscription_repo.update_config(state.db, new_config, timestamp)
 
@@ -165,7 +189,6 @@ fn handle_message(
 
       let new_state = SubscriptionState(..state, config: new_config)
 
-      // If enabled and not already scheduled, schedule next poll
       case new_config.enabled, state.self {
         True, Some(self) -> {
           let next_ts = timestamp + new_config.poll_interval_minutes * 60
@@ -202,131 +225,49 @@ fn handle_message(
   }
 }
 
-/// Execute a poll operation
-fn execute_poll(state: SubscriptionState) -> PollResult {
-  case subscription_feed.fetch_feed(state.config) {
-    Ok(videos) -> {
-      let total_found = list.length(videos)
-      let timestamp = get_timestamp()
+/// Run one engine pull and report the outcome back to the manager
+fn run_pull_worker(self: Subject(SubscriptionMessage)) -> Nil {
+  let layout = ytdl_sub.layout_from_env()
 
-      // Process each video
-      let results =
-        list.map(videos, fn(video) {
-          // Check if already seen
-          case subscription_repo.is_seen(state.db, video.video_id) {
-            Ok(True) -> #(video, subscription_types.SkippedAlreadySeen)
-            _ -> {
-              // Apply filters
-              let filter_result =
-                video_filter.should_download(
-                  video,
-                  state.config,
-                  None,
-                  timestamp,
-                )
-
-              // Mark as seen and queue if passed
-              case filter_result {
-                subscription_types.PassedFilter -> {
-                  // Create a download job
-                  let job_id = generate_job_id()
-                  let job_id_str = types.job_id_to_string(job_id)
-
-                  case repo.insert_job(state.db, job_id, video.url, timestamp) {
-                    Ok(_) -> {
-                      // Mark as seen with job reference
-                      let _ =
-                        subscription_repo.mark_seen(
-                          state.db,
-                          video,
-                          True,
-                          None,
-                          Some(job_id_str),
-                          timestamp,
-                        )
-                      io.println(
-                        "Queued: "
-                        <> video.title
-                        <> " ["
-                        <> video.video_id
-                        <> "]",
-                      )
-                      #(video, subscription_types.PassedFilter)
-                    }
-                    Error(_) -> {
-                      io.println("Failed to create job for: " <> video.title)
-                      #(
-                        video,
-                        subscription_types.SkippedExcludedKeyword(
-                          "job creation failed",
-                        ),
-                      )
-                    }
-                  }
-                }
-                _ -> {
-                  // Mark as seen with skip reason
-                  let skip_reason =
-                    subscription_types.filter_result_to_string(filter_result)
-                  let _ =
-                    subscription_repo.mark_seen(
-                      state.db,
-                      video,
-                      False,
-                      Some(skip_reason),
-                      None,
-                      timestamp,
-                    )
-                  io.println(
-                    "Skipped: " <> video.title <> " (" <> skip_reason <> ")",
-                  )
-                  #(video, filter_result)
-                }
-              }
-            }
+  let outcome = case ytdl_sub.ensure_layout(layout) {
+    Error(err) -> Error("layout: " <> err)
+    Ok(_) ->
+      case ytdl_sub.read_channels(layout.channels_file) {
+        Error(err) -> Error("channels: " <> err)
+        Ok([]) -> Error("no channels configured in " <> layout.channels_file)
+        Ok(channels) ->
+          case ytdl_sub.write_subscriptions(layout, channels) {
+            Error(err) -> Error("subscriptions: " <> err)
+            Ok(_) -> ytdl_sub.run_pull(layout, pull_timeout_ms())
           }
-        })
-
-      // Compute statistics
-      let new_videos =
-        list.count(results, fn(r) {
-          case r.1 {
-            subscription_types.SkippedAlreadySeen -> False
-            _ -> True
-          }
-        })
-
-      let queued =
-        list.count(results, fn(r) {
-          case r.1 {
-            subscription_types.PassedFilter -> True
-            _ -> False
-          }
-        })
-
-      let skipped =
-        list.count(results, fn(r) { subscription_types.is_skipped(r.1) })
-
-      PollResult(
-        total_found: total_found,
-        new_videos: new_videos,
-        queued_for_download: queued,
-        skipped: skipped,
-        errors: [],
-      )
-    }
-
-    Error(err) -> {
-      io.println("Poll error: " <> err)
-      PollResult(
-        total_found: 0,
-        new_videos: 0,
-        queued_for_download: 0,
-        skipped: 0,
-        errors: [err],
-      )
-    }
+      }
   }
+
+  process.send(self, PollFinished(outcome))
+}
+
+/// Record each newly added file in the seen-video table
+fn record_downloads(db: Db, paths: List(String), timestamp: Int) -> Nil {
+  let library_dir = ytdl_sub.layout_from_env().library_dir
+
+  list.each(paths, fn(path) {
+    let video = ytdl_sub.to_discovered_video(library_dir, path)
+    let _ = subscription_repo.mark_seen(db, video, True, None, None, timestamp)
+    io.println("Downloaded: " <> path)
+  })
+}
+
+/// Poll timeout in milliseconds
+fn pull_timeout_ms() -> Int {
+  let minutes = case envoy.get("POLL_TIMEOUT_MINUTES") {
+    Ok(raw) ->
+      case int.parse(raw) {
+        Ok(n) if n > 0 -> n
+        _ -> 360
+      }
+    Error(_) -> 360
+  }
+  minutes * 60_000
 }
 
 /// Schedule next poll after given minutes
@@ -338,58 +279,6 @@ fn schedule_poll(self: Subject(SubscriptionMessage), minutes: Int) -> Nil {
       process.send(self, Poll)
     })
   Nil
-}
-
-/// Generate a unique job ID
-fn generate_job_id() -> types.JobId {
-  let id = generate_uuid()
-  types.new_job_id(id)
-}
-
-/// Generate UUID
-fn generate_uuid() -> String {
-  let bytes = crypto_strong_rand_bytes(16)
-  bytes_to_hex(bytes)
-}
-
-@external(erlang, "crypto", "strong_rand_bytes")
-fn crypto_strong_rand_bytes(n: Int) -> BitArray
-
-fn bytes_to_hex(bytes: BitArray) -> String {
-  bytes
-  |> binary_to_hex_list
-  |> list.map(int_to_hex_char)
-  |> list.fold("", fn(acc, s) { acc <> s })
-}
-
-@external(erlang, "binary", "bin_to_list")
-fn binary_to_hex_list(bytes: BitArray) -> List(Int)
-
-fn int_to_hex_char(n: Int) -> String {
-  let high = n / 16
-  let low = n % 16
-  hex_digit(high) <> hex_digit(low)
-}
-
-fn hex_digit(n: Int) -> String {
-  case n {
-    0 -> "0"
-    1 -> "1"
-    2 -> "2"
-    3 -> "3"
-    4 -> "4"
-    5 -> "5"
-    6 -> "6"
-    7 -> "7"
-    8 -> "8"
-    9 -> "9"
-    10 -> "a"
-    11 -> "b"
-    12 -> "c"
-    13 -> "d"
-    14 -> "e"
-    _ -> "f"
-  }
 }
 
 fn bool_to_string(b: Bool) -> String {
@@ -411,7 +300,6 @@ type TimeUnit {
 @external(erlang, "erlang", "system_time")
 fn get_system_time_seconds(unit: TimeUnit) -> Int
 
-// Structured logging functions
 fn log_poll_start() -> Nil {
   let timestamp = format_timestamp(get_timestamp())
   io.println("[" <> timestamp <> "] [SUBSCRIPTION] POLL_START")
@@ -434,8 +322,6 @@ fn log_poll_end(found: Int, new: Int, queued: Int, skipped: Int) -> Nil {
 }
 
 fn format_timestamp(ts: Int) -> String {
-  // Convert seconds to ISO-8601 format
-  // calendar:system_time_to_rfc3339 returns a charlist, so we convert to binary
   format_iso8601_raw(ts, [#(Unit, Second)])
   |> charlist_to_string
 }

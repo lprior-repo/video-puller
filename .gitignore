@@ -25,3 +25,12 @@ erl_crash.dump
 
 # OS
 Thumbs.db
+
+# ytdl-sub engine lock files
+/.ytdl-sub-lock/
+
+# Beads local store
+.beads/embeddeddolt/
+.beads/backup/
+.beads/last-touched
+.beads/.auto-import-issues.jsonl
