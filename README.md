@@ -281,6 +281,12 @@ channels are merged into `channels.txt` on the next start or poll (the CSV is
 renamed to `subscriptions.csv.imported`). No account access or cookies are
 involved.
 
+Lines accept an optional label (`Display Name = URL`) and channel, playlist or
+single-video URLs. Channel forms (`@handle`, its `/videos`, `/shorts`,
+`/streams` tabs, or `channel/UC…`, with or without a trailing slash) collapse
+to one subscription; a query that selects the content (`?v=`, `?list=`) is
+preserved while decorative queries and fragments are dropped.
+
 Videos land in `${DATA_DIR:-./data}/library/<Channel>/Season <Year>/`. The first
 poll pulls the channel's full upload history; ytdl-sub's per-channel download
 archive under the library root keeps later polls incremental, so only new
@@ -293,18 +299,15 @@ and a poll that exits non-zero still records the files it did download while
 reporting the per-subscription errors. The format and size limits on the
 Settings page apply to the yt-dlp job path, not to subscription pulls.
 
-repeat polls are idempotent: ytdl-sub's download archive skips episodes already
-on disk, and seen-video rows are keyed by video id (`INSERT OR REPLACE`), so
-nothing duplicates. To populate the channel list without signing in, drop a
-Google Takeout `subscriptions.csv` into `${DATA_DIR}/ytdl-sub/`: missing URLs
-are merged into `channels.txt` (as `Channel Title = URL`, so the title becomes
-the Plex show name) on the next start or poll, and the CSV is renamed
-`.imported`. Alongside the video, the Plex preset writes Plex-style metadata —
-`poster.jpg` and `fanart.jpg` at the show root, an episode `-thumb.jpg` beside
-each video, and an mp4/h264 file with embedded tags. Plex does not read NFO
-sidecars, so none are generated (the Jellyfin/Emby presets add those); the
-`.info.json` files beside each episode are the engine's own metadata and are
-ignored by Plex.
+Polling is incremental and repeat-safe: ytdl-sub's download archive skips
+episodes already on disk, and every seen-video row carries the video's YouTube
+id from its `.info.json` sidecar (falling back to the file's library-relative
+path), so re-recording updates the row instead of duplicating it. Alongside
+the video, the Plex preset writes Plex-style metadata — `poster.jpg` and
+`fanart.jpg` at the show root, an episode `-thumb.jpg` beside each video, and
+an mp4/h264 file with embedded tags. Plex does not read NFO sidecars, so none
+are generated (the Jellyfin/Emby presets add those); the `.info.json` files
+beside each episode are the engine's own metadata and are ignored by Plex.
 
 The same channel can be listed in several URL forms (`@handle`, `@handle/videos`,
 `@handle/shorts`, `channel/UC…`, with or without a trailing slash). Channel
@@ -315,12 +318,15 @@ merge, the label that already has a `library/<label>/` directory wins, which
 keeps an existing archive (and Plex show) intact.
 
 An interrupted poll is safe too: the engine writes into
-`${DATA_DIR}/ytdl-sub/working` until a file is complete, and `seen_videos`
-only gets rows from the engine's "Files created" report — so a timed-out poll
-records nothing and the next poll re-checks the channel, skipping episodes
-already in the download archive.
+`${DATA_DIR}/ytdl-sub/working` until a file is complete, the deadline kills the
+engine's whole process tree, and after every poll — successful or timed out —
+the app reconciles the library, recording media files that have no row yet and
+ignoring thumbnails, sidecars and archives. A first poll that times out
+mid-backfill therefore keeps what it already downloaded, and the next poll
+skips those episodes through the download archive.
 `POLL_TIMEOUT_MINUTES` is a total deadline for one engine run; streaming
-output cannot extend it.
+output cannot extend it, and the timeout error carries the last engine output
+so a stalled enumeration (a very large channel) is diagnosable.
 
 ## Plex
 
@@ -413,6 +419,15 @@ Before deploying to production, ensure the following requirements are met:
   ```bash
   pipx install ytdl-sub
   ```
+- **ffmpeg**: mp4/h264 conversion, thumbnails and embedded metadata for both
+  subscription pulls and manual jobs
+  ```bash
+  apt install ffmpeg     # or: pacman -S ffmpeg / brew install ffmpeg
+  ```
+- **deno**: JS runtime yt-dlp uses for YouTube challenge handling
+  ```bash
+  apt install deno       # or: pacman -S deno / brew install deno
+  ```
 - **SQLite**: Version 3.35.0 or higher (for WAL mode support)
 - **Disk Space**: Sufficient storage for downloaded videos (depends on usage)
 - **Memory**: Minimum 512MB RAM, recommended 2GB+ for high concurrency
@@ -433,6 +448,11 @@ just release
 
 - [ ] Set `DB_PATH` to a persistent location outside the application directory
 - [ ] Set `OUTPUT_DIR` to a location with sufficient disk space
+- [ ] Set `DATA_DIR` (engine layout + Plex library) and seed
+      `DATA_DIR/ytdl-sub/channels.txt`, or drop a Takeout `subscriptions.csv`
+      beside it
+- [ ] Set `POLL_TIMEOUT_MINUTES` above the expected first-backfill time for
+      your largest channel
 - [ ] Generate a secure `SECRET_KEY` (64+ character random string)
 - [ ] Configure `MAX_CONCURRENCY` based on server capacity
 - [ ] Set appropriate `PORT` (default 8080)

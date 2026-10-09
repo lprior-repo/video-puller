@@ -54,13 +54,24 @@ The production system requires:
 2. **yt-dlp** (latest version recommended)
    - Install via pip: `pip install yt-dlp`
    - Or package manager: `apt install yt-dlp` or `pacman -S yt-dlp`
-   - Used for downloading videos from supported platforms
+   - Used for manual jobs and for resolving channel identity during
+     subscription pulls
 
-### Optional
-
-3. **FFmpeg**
+3. **ffmpeg**
    - Install via package manager: `apt install ffmpeg` or `pacman -S ffmpeg`
-   - Used by yt-dlp for video post-processing and format conversion
+   - Used for mp4/h264 conversion, thumbnails and embedded metadata in both the
+     manual-job and subscription paths
+
+4. **deno**
+   - JS runtime yt-dlp uses for YouTube challenge handling
+   - Without it, YouTube extraction degrades or fails on some videos
+
+### Required for subscription pulls
+
+5. **ytdl-sub**
+   - Install via pipx: `pipx install ytdl-sub`
+   - Only needed when the subscription engine is enabled; manual jobs work
+     without it. Requires yt-dlp and ffmpeg (above).
 
 ## Running the Release
 
@@ -109,9 +120,21 @@ The release is compatible with:
 The application respects these environment variables:
 
 - `PORT` - HTTP server port (default: 8080)
-- `DB_PATH` - SQLite database location (default: `data/video_eater.db`)
-- `STATIC_DIR` - Static assets directory (default: `priv/static`)
+- `DB_PATH` - SQLite database location (default: `./data/video_eater.db`)
+- `STATIC_DIR` - Static assets directory (default: `./priv/static`)
 - `SECRET_KEY` - Session secret key (auto-generated if not set)
+- `OUTPUT_DIR` - Manual download destination (default: `./downloads`; a
+  relative value resolves against `DATA_DIR`, since the service runs with a
+  read-only application directory)
+- `DATA_DIR` - Root for the ytdl-sub layout (`ytdl-sub/channels.txt`,
+  channel-id cache, working dir) and the Plex library (default: `./data`)
+- `CHANNELS_TEMPLATE` - Channel list seeded into `DATA_DIR` on first start
+  (default: `./priv/ytdl-sub/channels.txt`)
+- `POLL_TIMEOUT_MINUTES` - Deadline for a single engine run (default: `360`)
+
+Subscription pulls and the Plex library layout are documented in `README.md`
+(§Subscription Pulls, §Plex); the installers in `deploy/` and
+`deploy/macos/` set these variables for systemd and launchd respectively.
 
 Set these in the systemd service file or shell environment.
 
