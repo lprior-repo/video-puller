@@ -259,6 +259,22 @@ pub fn resolve_channel_ids(
   channels: List(Channel),
   cache_path: String,
 ) -> List(Channel) {
+  resolve_channel_ids_with_budget(channels, cache_path, 30_000)
+}
+
+@external(erlang, "erlang", "monotonic_time")
+fn monotonic_time(unit: MonotonicUnit) -> Int
+
+type MonotonicUnit {
+  Millisecond
+}
+
+fn resolve_channel_ids_with_budget(
+  channels: List(Channel),
+  cache_path: String,
+  budget_ms: Int,
+) -> List(Channel) {
+  let deadline = monotonic_time(Millisecond) + int.max(budget_ms, 0)
   let cache = load_cache(cache_path)
   let #(resolved, updated_cache) =
     list.fold(channels, #([], cache), fn(acc, channel) {
@@ -277,7 +293,9 @@ pub fn resolve_channel_ids(
           cache,
         )
         None, None ->
-          case lookup_channel(canonical) {
+          case
+            lookup_channel(canonical, deadline - monotonic_time(Millisecond))
+          {
             Some(#(found_id, title)) -> {
               let found = CacheRow(canonical, found_id, title)
               #(
@@ -302,12 +320,16 @@ pub fn dedupe_channels(
   let groups =
     list.fold(channels, [], fn(groups, channel) {
       let canonical = canonical_channel_url(channel.url)
-      let key = case embedded_channel_id(canonical) {
-        Some(id) -> "id:" <> id
-        None ->
-          case dict.get(ids, canonical) {
-            Ok(id) -> "id:" <> id
-            Error(_) -> "url:" <> canonical
+      let key = case is_channel_url(canonical) {
+        False -> "url:" <> canonical
+        True ->
+          case embedded_channel_id(canonical) {
+            Some(id) -> "id:" <> id
+            None ->
+              case dict.get(ids, canonical) {
+                Ok(id) -> "id:" <> id
+                Error(_) -> "url:" <> canonical
+              }
           }
       }
       add_group(groups, key, canonical, channel.label)
@@ -317,6 +339,7 @@ pub fn dedupe_channels(
     let label = choose_label(group.labels, derived, library_dir)
     Channel(Some(label), group.url)
   })
+  |> unique_labels
 }
 
 /// Newest uploads the recent pass inspects per channel, unless overridden
@@ -341,19 +364,77 @@ pub fn write_subscriptions_with(
   channels: List(Channel),
   recent_videos: Int,
 ) -> Result(Nil, String) {
-  let resolved = resolve_channel_ids(channels, layout.channel_ids_file)
+  write_subscription_files(layout, channels, recent_videos, 30_000)
+}
+
+/// Limit cold-cache lookups across the whole list, reserving time for downloads.
+pub fn write_subscriptions_with_budget(
+  layout: Layout,
+  channels: List(Channel),
+  budget_ms: Int,
+) -> Result(Nil, String) {
+  write_subscription_files(
+    layout,
+    channels,
+    recent_video_count(),
+    int.min(30_000, int.max(budget_ms / 10, 0)),
+  )
+}
+
+fn write_subscription_files(
+  layout: Layout,
+  channels: List(Channel),
+  recent_videos: Int,
+  budget_ms: Int,
+) -> Result(Nil, String) {
+  let cursor_path = layout.root <> "/ytdl-sub/poll_cursor.txt"
+  let offset = case simplifile.read(cursor_path) {
+    Ok(raw) -> int.parse(string.trim(raw)) |> result.unwrap(0)
+    Error(_) -> 0
+  }
+  // Rotate lookup work too: an unreachable first channel cannot monopolize
+  // the identity-resolution budget on every cold-cache poll.
+  let resolved =
+    resolve_channel_ids_with_budget(
+      rotate_channels(channels, offset),
+      layout.channel_ids_file,
+      budget_ms,
+    )
+  // Assign labels in original order before rotating downloads. A collision
+  // must never make two channels swap archive names from one poll to another.
+  let resolved =
+    list.map(channels, fn(channel) {
+      let found =
+        list.find(resolved, fn(value) {
+          value.url == canonical_channel_url(channel.url)
+        })
+        |> result.unwrap(channel)
+      case channel.label {
+        Some(label) -> Channel(Some(label), canonical_channel_url(channel.url))
+        None -> found
+      }
+    })
   let ids = channel_ids(resolved, load_cache(layout.channel_ids_file))
   let channels = dedupe_channels(resolved, ids, layout.library_dir)
+  let channels = rotate_channels(channels, offset)
   let recent_videos = case recent_videos > 0 {
     True -> recent_videos
     False -> default_recent_videos
   }
   use _ <- result.try(
-    write_subscription_file(layout.subscriptions_file, layout, channels, []),
+    write_subscription_file(layout.subscriptions_file, layout, channels, [
+      #("break_on_existing", "False"),
+    ]),
   )
-  write_subscription_file(layout.recent_subscriptions_file, layout, channels, [
-    #("playlist_end", int.to_string(recent_videos)),
-  ])
+  use _ <- result.try(
+    write_subscription_file(layout.recent_subscriptions_file, layout, channels, [
+      #("playlist_end", int.to_string(recent_videos)),
+    ]),
+  )
+  // Advance before execution so a killed or timed-out poll still gives the
+  // next channel first chance after restart. Archive names stay unchanged.
+  simplifile.write(cursor_path, int.to_string(offset + 1) <> "\n")
+  |> result.map_error(fn(err) { "cannot save poll cursor: " <> file_error(err) })
 }
 
 /// Newest-uploads window for the recent pass (`RECENT_VIDEOS`)
@@ -586,13 +667,13 @@ fn load_cache(path: String) -> List(CacheRow) {
 fn parse_cache_row(line: String) -> Option(CacheRow) {
   case string.split(string.trim(line), "\t") {
     [url, id, title, ..] ->
-      case string.is_empty(url) || string.is_empty(id) {
+      case !is_channel_url(url) || !valid_channel_id(id) {
         True -> None
         False ->
           Some(CacheRow(canonical_channel_url(url), id, nonempty_option(title)))
       }
     [url, id] ->
-      case string.is_empty(url) || string.is_empty(id) {
+      case !is_channel_url(url) || !valid_channel_id(id) {
         True -> None
         False -> Some(CacheRow(canonical_channel_url(url), id, None))
       }
@@ -601,7 +682,12 @@ fn parse_cache_row(line: String) -> Option(CacheRow) {
 }
 
 fn nonempty_option(value: String) -> Option(String) {
-  case string.is_empty(value) {
+  case
+    string.is_empty(value)
+    || value == "NA"
+    || value == "None"
+    || value == "null"
+  {
     True -> None
     False -> Some(value)
   }
@@ -660,7 +746,20 @@ fn apply_cache_title(channel: Channel, cached: Option(CacheRow)) -> Channel {
   }
 }
 
-fn lookup_channel(url: String) -> Option(#(String, Option(String))) {
+fn lookup_channel(
+  url: String,
+  remaining_ms: Int,
+) -> Option(#(String, Option(String))) {
+  case remaining_ms <= 0 || !is_channel_url(url) {
+    True -> None
+    False -> lookup_channel_with_timeout(url, int.min(30_000, remaining_ms))
+  }
+}
+
+fn lookup_channel_with_timeout(
+  url: String,
+  timeout_ms: Int,
+) -> Option(#(String, Option(String))) {
   let args = [
     "--no-warnings",
     "--flat-playlist",
@@ -674,7 +773,7 @@ fn lookup_channel(url: String) -> Option(#(String, Option(String))) {
     "%(playlist_channel)s",
     url,
   ]
-  case shell.run_with_timeout("yt-dlp", args, 30_000) {
+  case shell.run_with_timeout("yt-dlp", args, timeout_ms) {
     Ok(shell_result) ->
       case shell_result.exit_code {
         0 -> parse_lookup_output(shell_result.stdout)
@@ -690,14 +789,14 @@ pub fn parse_lookup_output(
 ) -> Option(#(String, Option(String))) {
   case string.split(string.trim(stdout), "\n") {
     [id, title, ..] ->
-      case string.is_empty(string.trim(id)) {
-        True -> None
-        False -> Some(#(string.trim(id), nonempty_option(string.trim(title))))
+      case valid_channel_id(string.trim(id)) {
+        False -> None
+        True -> Some(#(string.trim(id), nonempty_option(string.trim(title))))
       }
     [id] ->
-      case string.is_empty(string.trim(id)) {
-        True -> None
-        False -> Some(#(string.trim(id), None))
+      case valid_channel_id(string.trim(id)) {
+        False -> None
+        True -> Some(#(string.trim(id), None))
       }
     _ -> None
   }
@@ -1119,4 +1218,84 @@ fn escape_yaml(text: String) -> String {
   text
   |> string.replace("\\", "\\\\")
   |> string.replace("\"", "\\\"")
+}
+
+/// Rotate the first channel across polls without altering subscription labels.
+pub fn rotate_channels(channels: List(Channel), offset: Int) -> List(Channel) {
+  case list.length(channels) {
+    0 -> []
+    count -> {
+      let offset = int.max(offset, 0) % count
+      list.append(list.drop(channels, offset), list.take(channels, offset))
+    }
+  }
+}
+
+/// Only channel endpoints share a channel identity. Distinct playlists and
+/// individual videos from the same uploader remain distinct subscriptions.
+fn is_channel_url(url: String) -> Bool {
+  let parts = string.split(canonical_channel_url(url), "/")
+  case parts {
+    [_, "", host, path] ->
+      is_youtube_host(host) && string.starts_with(path, "@")
+    [_, "", host, kind, _] ->
+      is_youtube_host(host) && list.contains(["channel", "user", "c"], kind)
+    _ -> False
+  }
+}
+
+fn is_youtube_host(host: String) -> Bool {
+  list.contains(["youtube.com", "www.youtube.com", "m.youtube.com"], host)
+}
+
+fn valid_channel_id(id: String) -> Bool {
+  string.starts_with(id, "UC")
+  && string.length(id) > 2
+  && !string.contains(id, " ")
+  && !string.contains(id, "\t")
+}
+
+/// Duplicate YAML keys silently drop subscriptions. Preserve the first label
+/// and give later collisions a stable URL-derived suffix, also checking the
+/// suffix against explicitly named channels.
+fn unique_labels(channels: List(Channel)) -> List(Channel) {
+  let reserved =
+    list.map(channels, fn(channel) {
+      option.unwrap(channel.label, subscription_label(channel.url))
+    })
+  let #(reversed, _) =
+    list.fold(channels, #([], []), fn(acc, channel) {
+      let #(out, used) = acc
+      let label = option.unwrap(channel.label, subscription_label(channel.url))
+      let label = case list.contains(used, label) {
+        False -> label
+        True -> {
+          let suffix =
+            subscription_label(channel.url)
+            |> string.replace("/", "_")
+            |> string.replace(":", "_")
+            |> string.replace("?", "_")
+            |> string.replace("\\", "_")
+          available_label(label <> " (" <> suffix <> ")", reserved, used, 1)
+        }
+      }
+      #([Channel(Some(label), channel.url), ..out], [label, ..used])
+    })
+  list.reverse(reversed)
+}
+
+fn available_label(
+  base: String,
+  reserved: List(String),
+  used: List(String),
+  number: Int,
+) -> String {
+  let candidate = case number {
+    1 -> base
+    _ -> base <> " " <> int.to_string(number)
+  }
+  case list.contains(reserved, candidate) || list.contains(used, candidate) {
+    True -> available_label(base, reserved, used, number + 1)
+    False -> candidate
+  }
 }

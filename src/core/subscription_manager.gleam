@@ -10,7 +10,7 @@ import domain/subscription_types.{
 import engine/takeout
 import engine/ytdl_sub
 import envoy
-import gleam/erlang/process.{type Subject, type Timer}
+import gleam/erlang/process.{type Pid, type Subject, type Timer}
 import gleam/int
 import gleam/io
 import gleam/list
@@ -37,7 +37,7 @@ pub type SubscriptionMessage {
   /// Internal: store self reference
   SetSelf(Subject(SubscriptionMessage))
   /// Internal: a background pull finished
-  PollFinished(Result(ytdl_sub.PullSummary, String))
+  PollFinished(generation: Int, outcome: Result(ytdl_sub.PullSummary, String))
 }
 
 /// Internal state of the subscription manager
@@ -54,12 +54,30 @@ pub opaque type SubscriptionState {
     timer: Option(Timer),
     /// Fires when a poll worker never reports back
     watchdog: Option(Timer),
+    schedule_generation: Int,
+    /// Poll identity is independent of settings changes and schedule timers
     poll_generation: Int,
+    worker: Option(Pid),
+    run_poll: fn() -> Result(ytdl_sub.PullSummary, String),
+    watchdog_ms: Int,
   )
 }
 
 /// Start the subscription manager actor
 pub fn start(db: Db) -> Result(Subject(SubscriptionMessage), actor.StartError) {
+  start_with_runner(db, run_pull_worker, pull_timeout_ms() + 120_000)
+}
+
+/// Start with an injectable poll runner and watchdog deadline.
+///
+/// The runner executes in a separate process and must return only after all
+/// its downloads have stopped. This also lets lifecycle tests run without a
+/// downloader or network access.
+pub fn start_with_runner(
+  db: Db,
+  run_poll: fn() -> Result(ytdl_sub.PullSummary, String),
+  watchdog_ms: Int,
+) -> Result(Subject(SubscriptionMessage), actor.StartError) {
   let config = case subscription_repo.get_config(db) {
     Ok(c) -> c
     Error(_) -> subscription_types.default_config()
@@ -75,7 +93,11 @@ pub fn start(db: Db) -> Result(Subject(SubscriptionMessage), actor.StartError) {
       self: None,
       timer: None,
       watchdog: None,
+      schedule_generation: 0,
       poll_generation: 0,
+      worker: None,
+      run_poll: run_poll,
+      watchdog_ms: int.max(watchdog_ms, 1),
     )
 
   actor.start(
@@ -113,77 +135,16 @@ fn handle_message(
       }
     }
 
-    PollFinished(outcome) -> {
-      let timestamp = get_timestamp()
-      let _ = subscription_repo.update_last_poll(state.db, timestamp)
-      let library_dir = ytdl_sub.layout_from_env().library_dir
-
-      let poll_result = case outcome {
-        Ok(summary) -> {
-          let unrecorded =
-            record_downloads(
-              state.db,
-              library_dir,
-              summary.added_files,
-              timestamp,
-            )
-          // Runs after the engine's report so only files the report missed
-          // count as reconciled
-          let #(reconciled, unrecorded_reconcile) =
-            reconcile_library(state.db, library_dir, timestamp)
-          let total = summary.downloaded + reconciled
-          PollResult(
-            total_found: total,
-            new_videos: total,
-            queued_for_download: total,
-            skipped: 0,
-            errors: append_record_errors(
-              summary.errors,
-              unrecorded + unrecorded_reconcile,
-            ),
-          )
-        }
-        Error(err) -> {
-          io.println("Poll error: " <> err)
-          // The engine may have committed files to the library before it
-          // failed or hit the timeout. The download archive skips them on
-          // later polls, so they need recording here.
-          let #(reconciled, unrecorded) =
-            reconcile_library(state.db, library_dir, timestamp)
-          PollResult(
-            total_found: reconciled,
-            new_videos: reconciled,
-            queued_for_download: reconciled,
-            skipped: 0,
-            errors: append_record_errors([err], unrecorded),
-          )
-        }
+    PollFinished(generation, outcome) -> {
+      case state.is_polling && generation == state.poll_generation {
+        True -> finish_poll(state, outcome)
+        // A late completion from a timed-out worker cannot finish a newer poll
+        False -> actor.continue(state)
       }
-
-      log_poll_end(
-        poll_result.total_found,
-        poll_result.new_videos,
-        poll_result.queued_for_download,
-        list.length(poll_result.errors),
-      )
-
-      let finished_state =
-        SubscriptionState(
-          ..state,
-          is_polling: False,
-          last_result: Some(poll_result),
-          config: SubscriptionConfig(
-            ..state.config,
-            last_poll_at: Some(timestamp),
-          ),
-        )
-
-      // One chain only: this is the sole place the next poll timer is armed
-      actor.continue(arm_next_poll(disarm_watchdog(finished_state)))
     }
 
     ScheduledPoll(generation) -> {
-      case generation == state.poll_generation {
+      case generation == state.schedule_generation {
         True ->
           case state.config.enabled, state.is_polling {
             True, False -> start_poll(SubscriptionState(..state, timer: None))
@@ -200,23 +161,9 @@ fn handle_message(
         // The worker died without reporting back; recover instead of staying
         // "polling" until the next restart
         True, True -> {
-          io.println("⚠ Poll worker never reported back; recovering poll state")
-          let stalled =
-            SubscriptionState(
-              ..state,
-              is_polling: False,
-              watchdog: None,
-              last_result: Some(
-                PollResult(
-                  total_found: 0,
-                  new_videos: 0,
-                  queued_for_download: 0,
-                  skipped: 0,
-                  errors: ["subscription poll worker did not finish"],
-                ),
-              ),
-            )
-          actor.continue(arm_next_poll(stalled))
+          io.println("⚠ Poll worker exceeded its deadline; stopping poll")
+          stop_active_worker(state)
+          finish_poll(state, Error("subscription poll worker did not finish"))
         }
         _, _ -> actor.continue(state)
       }
@@ -253,6 +200,8 @@ fn handle_message(
 
     Shutdown -> {
       io.println("Subscription manager shutting down...")
+      let state = disarm_watchdog(disarm_timer(state))
+      stop_active_worker(state)
       actor.stop()
     }
 
@@ -265,40 +214,111 @@ fn handle_message(
   }
 }
 
-/// Run one engine pull and report the outcome back to the manager
-fn run_pull_worker(self: Subject(SubscriptionMessage)) -> Nil {
-  let layout = ytdl_sub.layout_from_env()
+/// Finish only the current poll, reconciling committed files on every outcome.
+fn finish_poll(
+  state: SubscriptionState,
+  outcome: Result(ytdl_sub.PullSummary, String),
+) -> actor.Next(SubscriptionState, SubscriptionMessage) {
+  let timestamp = get_timestamp()
+  let _ = subscription_repo.update_last_poll(state.db, timestamp)
+  let library_dir = ytdl_sub.layout_from_env().library_dir
 
-  let outcome = case ytdl_sub.ensure_layout(layout) {
-    Error(err) -> Error("layout: " <> err)
-    Ok(_) -> {
-      takeout.import_and_log(layout)
-      case ytdl_sub.read_channels(layout.channels_file) {
-        Error(err) -> Error("channels: " <> err)
-        Ok([]) -> Error("no channels configured in " <> layout.channels_file)
-        Ok(channels) ->
-          case ytdl_sub.write_subscriptions(layout, channels) {
-            Error(err) -> Error("subscriptions: " <> err)
-            Ok(_) -> run_poll_phases(layout)
-          }
-      }
+  let poll_result = case outcome {
+    Ok(summary) -> {
+      let unrecorded =
+        record_downloads(state.db, library_dir, summary.added_files, timestamp)
+      // Runs after the engine's report so only files the report missed
+      // count as reconciled
+      let #(reconciled, unrecorded_reconcile) =
+        reconcile_library(state.db, library_dir, timestamp)
+      let total = summary.downloaded + reconciled
+      PollResult(
+        total_found: total,
+        new_videos: total,
+        queued_for_download: total,
+        skipped: 0,
+        errors: append_record_errors(
+          summary.errors,
+          unrecorded + unrecorded_reconcile,
+        ),
+      )
+    }
+    Error(err) -> {
+      io.println("Poll error: " <> err)
+      // The engine may have committed files to the library before it
+      // failed or hit the timeout. The download archive skips them on
+      // later polls, so they need recording here.
+      let #(reconciled, unrecorded) =
+        reconcile_library(state.db, library_dir, timestamp)
+      PollResult(
+        total_found: reconciled,
+        new_videos: reconciled,
+        queued_for_download: reconciled,
+        skipped: 0,
+        errors: append_record_errors([err], unrecorded),
+      )
     }
   }
 
-  process.send(self, PollFinished(outcome))
+  log_poll_end(
+    poll_result.total_found,
+    poll_result.new_videos,
+    poll_result.queued_for_download,
+    list.length(poll_result.errors),
+  )
+
+  let finished_state =
+    SubscriptionState(
+      ..state,
+      is_polling: False,
+      worker: None,
+      last_result: Some(poll_result),
+      config: SubscriptionConfig(..state.config, last_poll_at: Some(timestamp)),
+    )
+
+  actor.continue(arm_next_poll(disarm_watchdog(finished_state)))
+}
+
+/// Run one engine pull within a deadline that includes channel preparation.
+fn run_pull_worker() -> Result(ytdl_sub.PullSummary, String) {
+  let deadline = monotonic_milliseconds() + pull_timeout_ms()
+  let layout = ytdl_sub.layout_from_env()
+
+  use _ <- result.try(
+    ytdl_sub.ensure_layout(layout)
+    |> result.map_error(fn(err) { "layout: " <> err }),
+  )
+  takeout.import_and_log(layout)
+  use channels <- result.try(
+    ytdl_sub.read_channels(layout.channels_file)
+    |> result.map_error(fn(err) { "channels: " <> err }),
+  )
+  case channels {
+    [] -> Error("no channels configured in " <> layout.channels_file)
+    [_, ..] -> {
+      use remaining <- result.try(remaining_poll_time(deadline))
+      use _ <- result.try(
+        ytdl_sub.write_subscriptions_with_budget(layout, channels, remaining)
+        |> result.map_error(fn(err) { "subscriptions: " <> err }),
+      )
+      run_poll_phases(layout, deadline)
+    }
+  }
 }
 
 /// Run one poll in two passes over the same channel list
 ///
-/// The recent pass checks every channel for fresh uploads inside a slice of the
-/// poll budget, then the backfill pass spends the rest on the channel backlog.
-/// A long first backfill therefore cannot leave new uploads waiting behind it,
-/// and a pass that fails still leaves the other pass's downloads recorded.
+/// The recent pass checks fresh uploads first within a slice of the poll
+/// budget, then backfill spends the remaining time on history. Both passes
+/// may time out before reaching every channel; the persisted channel rotation
+/// gives later channels the first chance on subsequent polls. Files from a
+/// surviving pass are retained even when the other pass fails.
 fn run_poll_phases(
   layout: ytdl_sub.Layout,
+  deadline: Int,
 ) -> Result(ytdl_sub.PullSummary, String) {
-  let #(recent_ms, backfill_ms) =
-    phase_timeouts(pull_timeout_ms(), recent_phase_ms())
+  use remaining <- result.try(remaining_poll_time(deadline))
+  let #(recent_ms, _) = phase_timeouts(remaining, recent_phase_ms())
 
   io.println(
     "Poll pass 1/2 - recent uploads: up to "
@@ -312,16 +332,20 @@ fn run_poll_phases(
     )
   log_pass("recent", recent)
 
-  io.println(
-    "Poll pass 2/2 - backfill: up to "
-    <> int.to_string(backfill_ms / 60_000)
-    <> " min",
-  )
-  let backfill =
-    label_pass(
-      "backfill pass",
-      ytdl_sub.run_pull(layout, layout.subscriptions_file, backfill_ms),
-    )
+  let backfill = case remaining_poll_time(deadline) {
+    Error(err) -> Error("backfill pass: " <> err)
+    Ok(backfill_ms) -> {
+      io.println(
+        "Poll pass 2/2 - backfill: up to "
+        <> int.to_string(backfill_ms / 60_000)
+        <> " min",
+      )
+      label_pass(
+        "backfill pass",
+        ytdl_sub.run_pull(layout, layout.subscriptions_file, backfill_ms),
+      )
+    }
+  }
   log_pass("backfill", backfill)
 
   ytdl_sub.merge_summaries(recent, backfill)
@@ -367,10 +391,14 @@ fn log_pass(
 /// Split the poll budget between the recent-upload pass and the backfill
 ///
 /// The recent pass never takes more than its own setting or a quarter of the
-/// poll budget, and the backfill always keeps at least a minute.
+/// poll budget. Backfill keeps at least a minute whenever the remaining
+/// budget permits, and sub-second remainders never become negative.
 pub fn phase_timeouts(total_ms: Int, recent_ms: Int) -> #(Int, Int) {
-  let cap = int.max(int.min(total_ms / 4, recent_ms), 1000)
-  let recent = int.min(cap, int.max(total_ms - minimum_backfill_ms, 1000))
+  let total_ms = int.max(total_ms, 0)
+  let minimum_recent = int.min(1000, total_ms / 4)
+  let cap = int.max(int.min(total_ms / 4, recent_ms), minimum_recent)
+  let recent =
+    int.min(cap, int.max(total_ms - minimum_backfill_ms, minimum_recent))
   #(recent, total_ms - recent)
 }
 
@@ -389,7 +417,7 @@ fn recent_phase_ms() -> Int {
 
 const default_recent_phase_minutes = 30
 
-/// The backfill pass always gets at least this much of the poll budget
+/// Reserve this much backfill time whenever the remaining budget permits
 const minimum_backfill_ms = 60_000
 
 /// Record each newly added file in the seen-video table
@@ -485,17 +513,24 @@ fn start_poll(
     Some(self) -> {
       // Unlinked on purpose: a crashed worker must not take the manager down,
       // and the watchdog recovers the polling flag either way
-      let _ = process.spawn_unlinked(fn() { run_pull_worker(self) })
+      let generation = state.poll_generation + 1
+      let worker =
+        process.spawn_unlinked(fn() {
+          let outcome = state.run_poll()
+          process.send(self, PollFinished(generation, outcome))
+        })
       // Two engine passes share the poll budget, so the watchdog leaves room
       // for both deadlines plus the startup and teardown of each process
       let watchdog =
-        process.send_after(
-          self,
-          pull_timeout_ms() + 120_000,
-          PollWatchdog(state.poll_generation),
-        )
+        process.send_after(self, state.watchdog_ms, PollWatchdog(generation))
       actor.continue(
-        SubscriptionState(..state, is_polling: True, watchdog: Some(watchdog)),
+        SubscriptionState(
+          ..state,
+          is_polling: True,
+          watchdog: Some(watchdog),
+          poll_generation: generation,
+          worker: Some(worker),
+        ),
       )
     }
     None -> actor.continue(state)
@@ -512,7 +547,7 @@ fn disarm_timer(state: SubscriptionState) -> SubscriptionState {
     ..state,
     timer: None,
     next_poll_at: None,
-    poll_generation: state.poll_generation + 1,
+    schedule_generation: state.schedule_generation + 1,
   )
 }
 
@@ -530,15 +565,15 @@ fn disarm_watchdog(state: SubscriptionState) -> SubscriptionState {
 /// Arming replaces whatever timer was pending, so a settings change, a manual
 /// poll or a finished poll can never leave more than one chain running.
 fn arm_next_poll(state: SubscriptionState) -> SubscriptionState {
+  let state = disarm_timer(state)
   let minutes = safe_minutes(state.config.poll_interval_minutes)
-  case state.config.enabled, state.self {
-    True, Some(self) -> {
-      let state = disarm_timer(state)
+  case state.config.enabled, state.is_polling, state.self {
+    True, False, Some(self) -> {
       let timer =
         process.send_after(
           self,
           minutes * 60_000,
-          ScheduledPoll(state.poll_generation),
+          ScheduledPoll(state.schedule_generation),
         )
       SubscriptionState(
         ..state,
@@ -546,8 +581,38 @@ fn arm_next_poll(state: SubscriptionState) -> SubscriptionState {
         next_poll_at: Some(get_timestamp() + minutes * 60),
       )
     }
-    _, _ -> state
+    _, _, _ -> state
   }
+}
+
+/// Stop downloads before making the poll slot available to another worker.
+fn stop_active_worker(state: SubscriptionState) -> Nil {
+  case state.worker {
+    Some(worker) -> stop_worker(worker)
+    None -> Nil
+  }
+}
+
+@external(erlang, "subscription_manager_ffi", "stop_worker")
+fn stop_worker(worker: Pid) -> Nil
+
+fn remaining_poll_time(deadline: Int) -> Result(Int, String) {
+  let remaining = deadline - monotonic_milliseconds()
+  case remaining > 0 {
+    True -> Ok(remaining)
+    False -> Error("subscription poll deadline exceeded")
+  }
+}
+
+@external(erlang, "erlang", "monotonic_time")
+fn monotonic_time(unit: MonotonicUnit) -> Int
+
+fn monotonic_milliseconds() -> Int {
+  monotonic_time(Millisecond)
+}
+
+type MonotonicUnit {
+  Millisecond
 }
 
 fn safe_minutes(minutes: Int) -> Int {

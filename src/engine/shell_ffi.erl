@@ -45,6 +45,10 @@ do_open_port(ExecutableChars, Args) ->
     ],
     try
         Port = open_port({spawn_executable, ExecutableChars}, PortSettings),
+        {os_pid, OsPid} = erlang:port_info(Port, os_pid),
+        Owner = self(),
+        Guardian = spawn(fun() -> guard_process(Owner, Port, OsPid) end),
+        put({shell_guardian, Port}, Guardian),
         {ok, Port}
     catch
         error:Reason ->
@@ -98,24 +102,61 @@ read_line_timeout(Port, Timeout) ->
         {error, timeout}
     end.
 
-%% Kill the process the port spawned and its direct children
-%%
-%% Closing a port does not reliably terminate an executable that ignores the
-%% EOF (ytdl-sub keeps downloading and holds its working-directory lock), so
-%% the timeout path kills it explicitly.
+%% Keep cleanup independent of the caller: a crashed/killed worker cannot
+%% execute its own timeout cleanup, and closing its port does not kill a child.
+%% Explicit close releases the guardian; every unexpected close kills the tree.
+guard_process(Owner, Port, OsPid) ->
+    OwnerRef = monitor(process, Owner),
+    PortRef = monitor(port, Port),
+    receive
+        {release, Owner, Port} -> ok;
+        {'DOWN', OwnerRef, process, Owner, _} -> kill_process_tree(OsPid);
+        {'DOWN', PortRef, port, Port, _} -> kill_process_tree(OsPid)
+    end,
+    demonitor(OwnerRef, [flush]),
+    demonitor(PortRef, [flush]).
+
+%% Freeze a parent before discovering its children, then recursively freeze
+%% and kill descendants before the parent. This prevents a live ancestor from
+%% spawning more children while cleanup runs. ps and kill work on Linux/macOS;
+%% pkill -P alone only kills one generation and leaves ffmpeg grandchildren.
 kill_port_tree(Port) ->
-    case erlang:port_info(Port, os_pid) of
-        {os_pid, OsPid} ->
-            Pid = integer_to_list(OsPid),
-            _ = os:cmd("pkill -9 -P " ++ Pid),
-            _ = os:cmd("kill -9 " ++ Pid),
+    try erlang:port_info(Port, os_pid) of
+        {os_pid, OsPid} -> kill_process_tree(OsPid);
+        _ -> ok
+    catch
+        error:badarg -> ok
+    end.
+
+kill_process_tree(OsPid) when is_integer(OsPid), OsPid > 1 ->
+    Pid = integer_to_list(OsPid),
+    %% Only continue if the process still exists; never walk from an absent PID.
+    case string:trim(os:cmd("kill -STOP " ++ Pid ++ " 2>/dev/null; echo $?")) of
+        "0" ->
+            Rows = string:split(os:cmd("ps -axo pid=,ppid="), "\n", all),
+            Children = lists:filtermap(fun(Row) ->
+                case string:lexemes(Row, " \t\r") of
+                    [Child, Parent] ->
+                        case {string:to_integer(Child), string:to_integer(Parent)} of
+                            {{ChildPid, ""}, {OsPid, ""}} when ChildPid > 1 ->
+                                {true, ChildPid};
+                            _ -> false
+                        end;
+                    _ -> false
+                end
+            end, Rows),
+            lists:foreach(fun kill_process_tree/1, Children),
+            _ = os:cmd("kill -KILL " ++ Pid ++ " 2>/dev/null"),
             ok;
-        _ ->
-            ok
+        _ -> ok
     end.
 
 %% Close the port gracefully
 close_port(Port) ->
+    case erase({shell_guardian, Port}) of
+        undefined -> ok;
+        Guardian -> Guardian ! {release, self(), Port}
+    end,
     try
         Port ! {self(), close},
         receive

@@ -51,14 +51,20 @@ cookies and no account access at any point.
   quarter of the poll; the backfill always keeps at least a minute.
   `phase_timeouts/2` owns the split, and `merge_summaries/2` combines the
   outcomes — files from a surviving pass are kept, a failed pass is reported,
-  and a file both passes reported is counted once.
+  and a file both passes reported is counted once. A persisted `poll_cursor.txt`
+  rotates the starting channel each poll, including after timeouts/restarts.
+  Cold-cache channel lookups share a bounded preparation budget. Duplicate
+  display labels receive unique suffixes before rotation; missing lookup IDs
+  never merge unrelated subscriptions.
 
 ### Idempotency guarantees
 
 Repeat runs are safe by construction; keep these invariants when refactoring:
 
-- **Engine**: the preset sets `maintain_download_archive` +
-  `break_on_existing`, so a later poll never re-downloads existing episodes.
+- **Engine**: `maintain_download_archive` prevents re-downloading archived
+  episodes. The recent pass keeps `break_on_existing`; the full-history pass
+  explicitly disables it so recent downloads and interrupted runs cannot hide
+  older episodes behind the first archived video.
 - **DB**: `seen_videos.video_id` is the PRIMARY KEY and rows are written via
   `INSERT OR REPLACE` (`mark_seen`), so re-recording updates instead of
   duplicating.

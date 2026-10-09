@@ -20,8 +20,6 @@ PLIST_DIR="${PLIST_DIR:-$HOME/Library/LaunchAgents}"
 LABEL="local.video-puller"
 PLIST="$PLIST_DIR/$LABEL.plist"
 REPO_URL="https://github.com/lprior-repo/video-puller.git"
-BREW_BIN="$(brew --prefix 2>/dev/null)/bin"
-LAUNCH_PATH="$BREW_BIN:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 info() { printf '\033[0;32m[INFO]\033[0m %s\n' "$1"; }
 warn() { printf '\033[0;33m[WARN]\033[0m %s\n' "$1"; }
@@ -32,9 +30,11 @@ error() {
 
 xml_escape() {
   local value=$1
-  value=${value//&/&amp;}
-  value=${value//</&lt;}
-  value=${value//>/&gt;}
+  # Escape replacement ampersands too: Bash 5.2 expands unquoted & to the
+  # matched text, unlike the Bash 3.2 shipped with macOS.
+  value=${value//&/\&amp;}
+  value=${value//</\&lt;}
+  value=${value//>/\&gt;}
   printf '%s' "$value"
 }
 
@@ -43,6 +43,9 @@ if [[ "$(uname -s)" != "Darwin" && "${ALLOW_NON_MAC:-0}" != "1" ]]; then
 fi
 
 command -v brew >/dev/null 2>&1 || error "Homebrew is required: https://brew.sh"
+BREW_PREFIX="$(brew --prefix)" || error "Could not determine the Homebrew prefix"
+BREW_BIN="$BREW_PREFIX/bin"
+LAUNCH_PATH="$BREW_BIN:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 info "Installing runtime dependencies with Homebrew"
 for formula in erlang ffmpeg pipx deno yt-dlp; do

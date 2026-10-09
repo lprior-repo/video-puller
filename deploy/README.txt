@@ -85,7 +85,8 @@ Install these before starting; the unit runs with PATH=/usr/local/bin:/usr/bin
       sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install ytdl-sub
   or via your package manager, and keep the binary on the unit's PATH.
 - yt-dlp (single-video jobs, channel-identity resolution)
-      sudo pipx install yt-dlp    # or: apt install yt-dlp / pacman -S yt-dlp
+      sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install yt-dlp
+  or via your package manager (apt install yt-dlp / pacman -S yt-dlp).
 - FFmpeg (mp4 conversion, thumbnails, embedded metadata)
       apt install ffmpeg / pacman -S ffmpeg
 - deno (JS runtime yt-dlp uses for YouTube challenge handling)
@@ -96,6 +97,10 @@ Data and library layout:
 The unit sets DATA_DIR=/var/lib/video-puller, so everything the app owns lives
 there:
 
+- /var/lib/video-puller/.cache/
+      private tool caches (Gleam at build time; yt-dlp / Deno at runtime)
+- /var/lib/video-puller/.cache/erl_crash.dump
+      Erlang crash diagnostics, when generated
 - /var/lib/video-puller/video_eater.db
       application database (jobs, settings, subscription state, seen videos)
 - /var/lib/video-puller/ytdl-sub/
@@ -155,10 +160,13 @@ Plex reads the `Season <year>` folders, poster.jpg/fanart.jpg and the episode
 sidecars are ytdl-sub's own metadata.
 
 Permissions: install.sh leaves the data root mode 711 (traversable, not
-listable) and library/ at 755, and hardens any existing video_eater.db* to 600.
-The Plex service account therefore needs no shared login - only filesystem read
-access to /var/lib/video-puller/library. New content is created 755/644 (umask
-022), which Plex can read.
+listable), library directories at 755 and media files at 644. It creates a
+fresh database at 600 before the service starts and hardens existing
+video_eater.db* files to 600; SQLite also uses those private permissions for
+its WAL and shared-memory sidecars. Tool caches live in a private .cache/
+directory (700) under the data root, since the service has no login home and
+ProtectHome hides /home. The unit explicitly uses umask 022 so new Plex
+content is readable without a shared login.
 
 Plex picks new episodes up on a library scan; the app does not call Plex. Polls
 update the library in place, so rescanning (or Plex's periodic scan) after a
@@ -181,7 +189,8 @@ If you prefer to install manually:
    sudo useradd --system --no-create-home --shell /usr/sbin/nologin video-puller
 
 2. Create directories:
-   sudo mkdir -p /opt/video-puller /var/lib/video-puller/library
+   sudo mkdir -p /opt/video-puller /var/lib/video-puller/library /var/lib/video-puller/.cache
+   sudo sh -c 'umask 077; touch /var/lib/video-puller/video_eater.db'
 
 3. Copy project files, then set ownership (copy first so build artifacts are
    not left root-owned):
@@ -189,11 +198,15 @@ If you prefer to install manually:
    sudo chown -R video-puller:video-puller /opt/video-puller
    sudo chown -R video-puller:video-puller /var/lib/video-puller
    sudo chmod 711 /var/lib/video-puller
-   sudo chmod -R 755 /var/lib/video-puller/library
+   sudo chmod 700 /var/lib/video-puller/.cache
+   sudo find /var/lib/video-puller -maxdepth 1 -name 'video_eater.db*' -exec chmod 600 {} +
+   sudo find /var/lib/video-puller/library -type d -exec chmod 755 {} +
+   sudo find /var/lib/video-puller/library -type f -exec chmod 644 {} +
 
 4. Build the project release:
    cd /opt/video-puller
-   sudo -u video-puller gleam export erlang-shipment
+   sudo -u video-puller env HOME=/var/lib/video-puller \
+     XDG_CACHE_HOME=/var/lib/video-puller/.cache gleam export erlang-shipment
 
 5. Install systemd service:
    sudo cp deploy/video-puller.service /etc/systemd/system/
@@ -207,6 +220,8 @@ Edit the service file to customize:
 - PORT (default: 8080)
 - DB_PATH (default: /var/lib/video-puller/video_eater.db)
 - DATA_DIR (default: /var/lib/video-puller; engine layout + library root)
+  If changing it, also update HOME, XDG_CACHE_HOME, ERL_CRASH_DUMP and
+  ReadWritePaths to stay within the new writable tree.
 - STATIC_DIR (default: /opt/video-puller/priv/static)
 - POLL_TIMEOUT_MINUTES (default: 360; total deadline for one poll, both passes)
 - RECENT_VIDEOS (default: 5; newest uploads the recent pass checks per channel)
@@ -290,3 +305,17 @@ Troubleshooting:
    - Confirm Plex can read the tree: sudo -u <plexuser> ls /var/lib/video-puller/library
    - Check the library dir modes (711 on the data root, 755 on library)
    - Trigger a library scan after a poll; the app never refreshes Plex itself
+
+Installer Regression Checks:
+----------------------------
+From the project root, run:
+  bash -n deploy/install.sh deploy/macos/install.sh deploy/uninstall.sh
+  python3 -m unittest discover -s deploy/tests -v
+
+These tests use temporary directories and stub package-manager, build,
+privileged and service commands. They cover generated macOS plist escaping
+(including Bash 5.2), dependency checks, prebuilt upgrades, preserving an
+existing plist after validation failure, Linux copy/ownership ordering,
+fresh and existing database permissions, and runtime writable paths. They
+never install software, contact download sites, or start services; native
+macOS launchd and actual systemd startup still require platform validation.

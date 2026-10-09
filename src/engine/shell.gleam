@@ -69,8 +69,8 @@ pub fn run_with_timeout(
     Ok(_) -> {
       // Use streaming execution with a total deadline: a command that keeps
       // emitting output must still be killed once the budget is used up
-      use stream <- result.try(open_stream(command, args))
       let deadline = monotonic_milliseconds() + timeout_ms
+      use stream <- result.try(open_stream(command, args))
 
       case read_with_deadline(stream, deadline, None, False, [], []) {
         Ok(#(exit_code, stdout_lines, stderr_lines)) -> {
@@ -161,10 +161,10 @@ fn read_with_deadline(
                 stderr_acc,
               )
           }
-        Ok(StreamError(_)) ->
+        Ok(StreamError(message)) ->
           case exit_code {
             Some(code) -> Ok(finish_result(code, stdout_acc, stderr_acc))
-            None -> Ok(finish_result(1, stdout_acc, stderr_acc))
+            None -> Error(ExecutionError("Command stream failed: " <> message))
           }
         Error(Timeout) ->
           case exit_code {
@@ -405,29 +405,41 @@ pub fn run_streaming(
 ) -> Result(Int, ShellError) {
   use stream <- result.try(open_stream(command, args))
 
-  let exit_code = stream_loop(stream, callback, 0)
+  let outcome = stream_loop(stream, callback, None, False)
 
+  case outcome {
+    Error(_) -> kill_port_tree(stream)
+    Ok(_) -> Nil
+  }
   close_stream(stream)
 
-  Ok(exit_code)
+  outcome
 }
 
-/// Internal loop for processing stream lines
+/// EOF and exit status are independent events. Wait for both, in either
+/// order, and never turn a read failure into a successful exit.
 fn stream_loop(
   stream: StreamingPort,
   callback: fn(String) -> Nil,
-  last_exit_code: Int,
-) -> Int {
+  exit_code: Option(Int),
+  saw_eof: Bool,
+) -> Result(Int, ShellError) {
   case read_stream_line(stream) {
     OutputLine(line) -> {
       callback(line)
-      stream_loop(stream, callback, last_exit_code)
+      stream_loop(stream, callback, exit_code, saw_eof)
     }
-    ProcessExit(code) -> {
-      // Continue reading to drain any remaining output
-      stream_loop(stream, callback, code)
-    }
-    EndOfStream -> last_exit_code
-    StreamError(_) -> last_exit_code
+    ProcessExit(code) ->
+      case saw_eof {
+        True -> Ok(code)
+        False -> stream_loop(stream, callback, Some(code), False)
+      }
+    EndOfStream ->
+      case exit_code {
+        Some(code) -> Ok(code)
+        None -> stream_loop(stream, callback, None, True)
+      }
+    StreamError(message) ->
+      Error(ExecutionError("Command stream failed: " <> message))
   }
 }

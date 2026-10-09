@@ -132,3 +132,50 @@ pub fn run_with_timeout_kills_child_process_tree_test() {
     Error(_) -> should.fail()
   }
 }
+
+pub fn run_streaming_uses_exit_status_after_eof_test() {
+  shell.run_streaming("sh", ["-c", "exec 1>&- 2>&-; sleep 0.1; exit 7"], fn(_) {
+    Nil
+  })
+  |> should.equal(Ok(7))
+}
+
+pub fn run_streaming_returns_success_test() {
+  shell.run_streaming("echo", ["hello"], fn(_) { Nil })
+  |> should.equal(Ok(0))
+}
+
+@external(erlang, "shell_test_ffi", "new_pid_file")
+fn new_pid_file() -> String
+
+@external(erlang, "shell_test_ffi", "descendant_stopped")
+fn descendant_stopped(path: String) -> Bool
+
+@external(erlang, "shell_test_ffi", "guardian_kills_tree")
+fn guardian_kills_tree() -> Bool
+
+/// A child shell starts a grandchild which ignores closed stdout. Checking its
+/// PID catches the old direct-children-only cleanup without global pgrep names.
+pub fn run_with_timeout_kills_grandchildren_test() {
+  let path = new_pid_file()
+  let result =
+    shell.run_with_timeout(
+      "sh",
+      [
+        "-c",
+        "sh -c 'sh -c '\"'\"'echo $$ > "
+          <> path
+          <> " ; exec sleep 30'\"'\"' & wait' & wait",
+      ],
+      500,
+    )
+  case result {
+    Error(shell.ExecutionError(_)) -> Nil
+    _ -> should.fail()
+  }
+  descendant_stopped(path) |> should.be_true()
+}
+
+pub fn killed_stream_owner_does_not_orphan_children_test() {
+  guardian_kills_tree() |> should.be_true()
+}

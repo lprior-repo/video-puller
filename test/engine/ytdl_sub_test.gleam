@@ -544,3 +544,143 @@ pub fn merge_summaries_reports_both_failures_test() {
   ytdl_sub.merge_summaries(Error("recent: timeout"), Error("backfill: timeout"))
   |> should.equal(Error("recent: timeout | backfill: timeout"))
 }
+
+pub fn lookup_rejects_missing_or_malformed_identity_test() {
+  ytdl_sub.parse_lookup_output("NA\nNA\n") |> should.equal(None)
+  ytdl_sub.parse_lookup_output("None\nTitle\n") |> should.equal(None)
+  ytdl_sub.parse_lookup_output("warning text\nTitle\n") |> should.equal(None)
+  ytdl_sub.parse_lookup_output("UCvalid\nNA\n")
+  |> should.equal(Some(#("UCvalid", None)))
+}
+
+pub fn distinct_playlists_do_not_merge_by_uploader_test() {
+  let first = "https://www.youtube.com/playlist?list=PLone"
+  let second = "https://www.youtube.com/playlist?list=PLtwo"
+  let channels = [
+    ytdl_sub.Channel(Some("First"), first),
+    ytdl_sub.Channel(Some("Second"), second),
+  ]
+  ytdl_sub.dedupe_channels(
+    channels,
+    dict.from_list([#(first, "UCsame"), #(second, "UCsame")]),
+    "/tmp/no_vp_playlist_library",
+  )
+  |> should.equal(channels)
+}
+
+pub fn duplicate_labels_are_unique_without_dropping_channels_test() {
+  let channels = [
+    ytdl_sub.Channel(Some("News"), "https://www.youtube.com/channel/UCfirst"),
+    ytdl_sub.Channel(Some("News"), "https://www.youtube.com/channel/UCsecond"),
+    ytdl_sub.Channel(
+      Some("News (UCsecond)"),
+      "https://www.youtube.com/channel/UCthird",
+    ),
+  ]
+  ytdl_sub.dedupe_channels(channels, dict.new(), "/tmp/no_vp_labels_library")
+  |> should.equal([
+    ytdl_sub.Channel(Some("News"), "https://www.youtube.com/channel/UCfirst"),
+    ytdl_sub.Channel(
+      Some("News (UCsecond) 2"),
+      "https://www.youtube.com/channel/UCsecond",
+    ),
+    ytdl_sub.Channel(
+      Some("News (UCsecond)"),
+      "https://www.youtube.com/channel/UCthird",
+    ),
+  ])
+}
+
+pub fn channel_rotation_wraps_and_handles_empty_list_test() {
+  let a = ytdl_sub.Channel(Some("A"), "https://www.youtube.com/channel/UCa")
+  let b = ytdl_sub.Channel(Some("B"), "https://www.youtube.com/channel/UCb")
+  let c = ytdl_sub.Channel(Some("C"), "https://www.youtube.com/channel/UCc")
+  ytdl_sub.rotate_channels([a, b, c], 4) |> should.equal([b, c, a])
+  ytdl_sub.rotate_channels([a, b, c], -1) |> should.equal([a, b, c])
+  ytdl_sub.rotate_channels([], 10) |> should.equal([])
+}
+
+pub fn full_history_pass_crosses_recent_archive_and_rotates_after_restart_test() {
+  let root = "/tmp/test_ytdl_sub_rotation"
+  let _ = simplifile.delete_all([root])
+  let layout = ytdl_sub.layout(root)
+  let _ = simplifile.create_directory_all(root <> "/ytdl-sub")
+  let channels = [
+    ytdl_sub.Channel(Some("A"), "https://www.youtube.com/channel/UCa"),
+    ytdl_sub.Channel(Some("B"), "https://www.youtube.com/channel/UCb"),
+  ]
+  ytdl_sub.write_subscriptions_with_budget(layout, channels, 0)
+  |> should.be_ok()
+  let first = simplifile.read(layout.subscriptions_file) |> should.be_ok()
+  first
+  |> string.contains("  ytdl_options:\n    break_on_existing: False\n")
+  |> should.be_true()
+  first
+  |> string.ends_with("    \"B\": \"https://www.youtube.com/channel/UCb\"\n")
+  |> should.be_true()
+  // A newly constructed layout reads the saved cursor without process state.
+  ytdl_sub.write_subscriptions_with_budget(ytdl_sub.layout(root), channels, 0)
+  |> should.be_ok()
+  let second = simplifile.read(layout.subscriptions_file) |> should.be_ok()
+  second
+  |> string.ends_with("    \"A\": \"https://www.youtube.com/channel/UCa\"\n")
+  |> should.be_true()
+  let recent =
+    simplifile.read(layout.recent_subscriptions_file) |> should.be_ok()
+  recent |> string.contains("break_on_existing: False") |> should.be_false()
+  recent
+  |> string.ends_with("    \"A\": \"https://www.youtube.com/channel/UCa\"\n")
+  |> should.be_true()
+  let _ = simplifile.delete_all([root])
+}
+
+pub fn exhausted_lookup_budget_still_generates_usable_subscriptions_test() {
+  let root = "/tmp/test_ytdl_sub_no_lookup_budget"
+  let _ = simplifile.delete_all([root])
+  let layout = ytdl_sub.layout(root)
+  let _ = simplifile.create_directory_all(root <> "/ytdl-sub")
+  // Invalid legacy cache identities must not silently merge unrelated handles.
+  let _ =
+    simplifile.write(
+      layout.channel_ids_file,
+      "https://www.youtube.com/@one\tNA\tNA\nhttps://www.youtube.com/@two\tNA\tNA\n",
+    )
+  ytdl_sub.write_subscriptions_with_budget(
+    layout,
+    [
+      ytdl_sub.Channel(None, "https://www.youtube.com/@one"),
+      ytdl_sub.Channel(None, "https://www.youtube.com/@two"),
+    ],
+    0,
+  )
+  |> should.be_ok()
+  let content = simplifile.read(layout.subscriptions_file) |> should.be_ok()
+  content |> string.contains("\"one\":") |> should.be_true()
+  content |> string.contains("\"two\":") |> should.be_true()
+  let _ = simplifile.delete_all([root])
+}
+
+pub fn rotated_lookup_preserves_each_explicit_alias_label_test() {
+  let root = "/tmp/test_ytdl_sub_alias_labels"
+  let _ = simplifile.delete_all([root])
+  let layout = ytdl_sub.layout(root)
+  let _ = simplifile.create_directory_all(root <> "/ytdl-sub")
+  let _ =
+    simplifile.create_directory_all(layout.library_dir <> "/Existing Name")
+  ytdl_sub.write_subscriptions_with_budget(
+    layout,
+    [
+      ytdl_sub.Channel(Some("New Name"), "https://www.youtube.com/@alias"),
+      ytdl_sub.Channel(
+        Some("Existing Name"),
+        "https://www.youtube.com/@alias/videos",
+      ),
+    ],
+    0,
+  )
+  |> should.be_ok()
+  let content = simplifile.read(layout.subscriptions_file) |> should.be_ok()
+  content |> string.contains("\"Existing Name\":") |> should.be_true()
+  content |> string.contains("\"New Name\":") |> should.be_false()
+  let _ = simplifile.delete_all([root])
+}
