@@ -20,7 +20,8 @@ fn route(req: Request, ctx: Context) -> Response {
     http.Get, ["health"] -> handlers.health(req, ctx)
 
     // Dashboard (home page)
-    http.Get, [] -> handlers.dashboard(req, ctx)
+    http.Get, [] -> handlers.subscriptions(req, ctx)
+    http.Get, ["download"] -> handlers.dashboard(req, ctx)
     http.Get, ["dashboard"] -> handlers.dashboard(req, ctx)
 
     // Queue page
@@ -43,6 +44,11 @@ fn route(req: Request, ctx: Context) -> Response {
 
     // Subscriptions page
     http.Get, ["subscriptions"] -> handlers.subscriptions(req, ctx)
+    http.Get, ["subscriptions", "live"] -> handlers.subscriptions_live(req, ctx)
+    http.Post, ["subscriptions", "channels"] ->
+      handlers.import_subscription_channels(req, ctx)
+    http.Post, ["subscriptions", "channels", "add"] ->
+      handlers.add_subscription_channel(req, ctx)
 
     // Update subscription settings
     http.Post, ["subscriptions", "settings"] ->

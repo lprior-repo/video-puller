@@ -4,43 +4,74 @@
 /// Handlers interact with the database through the context.
 import core/subscription_manager
 import domain/core_types.{Completed, Failed}
-import domain/subscription_types.{type SubscriptionStatus}
+import domain/subscription_types.{
+  type SeenVideo, type SubscriptionStatus, SeenVideo,
+}
 import domain/types
+import engine/channel_import.{ImportSummary}
+import engine/nfo
 import engine/shell
+import engine/subscription_progress
+import engine/subscription_settings
 import engine/ytdl_sub
 import engine/ytdlp
+import envoy
 import gleam/erlang/process
 import gleam/http/request
 import gleam/int
 import gleam/io
 import gleam/json
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import infra/db
 import infra/repo
 import infra/subscription_repo
 import lustre/attribute.{class}
-import lustre/element.{type Element, text}
+import lustre/element.{type Element, text, to_document_string}
 import lustre/element/html.{a, div, h2, li, p, ul}
+import simplifile
+import web/library_feed
 import web/middleware.{type Context, html_response, json_response, redirect}
 import web/templates
 import wisp.{type Request, type Response}
 
-/// Health endpoint - returns server status with database connectivity check
+/// Check the database and scheduler mailbox, so an external watchdog also
+/// detects a live VM whose subscription actor has stopped responding.
 pub fn health(_req: Request, ctx: Context) -> Response {
   // Check database connectivity by running a simple query
   case check_database_connection(ctx.db) {
     Ok(_) -> {
+      let scheduler_ok = scheduler_responsive(ctx)
       let body =
         json.object([
-          #("status", json.string("ok")),
+          #(
+            "status",
+            json.string(case scheduler_ok {
+              True -> "ok"
+              False -> "error"
+            }),
+          ),
           #("database", json.string("connected")),
+          #(
+            "scheduler",
+            json.string(case ctx.subscription_manager, scheduler_ok {
+              None, _ -> "not_configured"
+              Some(_), True -> "responsive"
+              Some(_), False -> "unresponsive"
+            }),
+          ),
         ])
         |> json.to_string
 
-      json_response(200, body)
+      json_response(
+        case scheduler_ok {
+          True -> 200
+          False -> 503
+        },
+        body,
+      )
     }
     Error(_) -> {
       let body =
@@ -55,6 +86,24 @@ pub fn health(_req: Request, ctx: Context) -> Response {
   }
 }
 
+fn scheduler_responsive(ctx: Context) -> Bool {
+  case ctx.subscription_manager {
+    None -> True
+    Some(manager) ->
+      case process.subject_owner(manager) {
+        Error(_) -> False
+        Ok(_) -> {
+          let reply = process.new_subject()
+          process.send(manager, subscription_manager.GetStatus(reply))
+          case process.receive(reply, 500) {
+            Ok(_) -> True
+            Error(_) -> False
+          }
+        }
+      }
+  }
+}
+
 /// Check database connectivity by executing a simple query
 fn check_database_connection(conn: db.Db) -> Result(Nil, db.DbError) {
   // Try to execute a simple query to verify database connectivity
@@ -66,7 +115,7 @@ pub fn dashboard(_req: Request, ctx: Context) -> Response {
   case repo.list_jobs(ctx.db, None) {
     Ok(jobs) -> {
       templates.layout(
-        "Dashboard",
+        "Download",
         templates.dashboard_page(jobs, ctx.output_directory),
       )
       |> html_response(200, _)
@@ -96,22 +145,27 @@ pub fn create_job(req: Request, ctx: Context) -> Response {
     Ok(url_value) -> {
       case validate_video_url(url_value) {
         Ok(validated_url) -> {
-          // Generate a new job ID and timestamp
-          let job_id = generate_job_id()
-          let timestamp = get_timestamp()
+          case youtube_subscription_request(ctx, validated_url) {
+            Some(channel) -> stage_video_requests(ctx, [channel])
+            None -> {
+              // Generate a new job ID and timestamp
+              let job_id = generate_job_id()
+              let timestamp = get_timestamp()
 
-          case repo.insert_job(ctx.db, job_id, validated_url, timestamp) {
-            Ok(_) -> {
-              io.println("Created job: " <> types.job_id_to_string(job_id))
-              redirect(to: "/")
-            }
-            Error(err) -> {
-              io.println("Failed to create job: " <> string.inspect(err))
-              templates.layout(
-                "Error",
-                templates.error_page(500, "Failed to create job"),
-              )
-              |> html_response(500, _)
+              case repo.insert_job(ctx.db, job_id, validated_url, timestamp) {
+                Ok(_) -> {
+                  io.println("Created job: " <> types.job_id_to_string(job_id))
+                  redirect(to: "/")
+                }
+                Error(err) -> {
+                  io.println("Failed to create job: " <> string.inspect(err))
+                  templates.layout(
+                    "Error",
+                    templates.error_page(500, "Failed to create job"),
+                  )
+                  |> html_response(500, _)
+                }
+              }
             }
           }
         }
@@ -194,29 +248,46 @@ pub fn create_batch_jobs(req: Request, ctx: Context) -> Response {
               |> html_response(400, _)
             }
             _ -> {
-              // Use batch insert for efficiency (handles 500+ URLs efficiently)
-              let timestamp = get_timestamp()
-              case repo.insert_jobs_batch(ctx.db, validated, timestamp) {
-                Ok(inserted_count) -> {
-                  io.println(
-                    "Batch created: "
-                    <> int.to_string(inserted_count)
-                    <> " jobs (from "
-                    <> int.to_string(valid_count)
-                    <> " valid URLs out of "
-                    <> int.to_string(total_count)
-                    <> " total)",
-                  )
-                  // Redirect to queue page to show the new jobs
-                  redirect(to: "/queue")
-                }
-                Error(err) -> {
-                  io.println("Batch insert failed: " <> string.inspect(err))
-                  templates.layout(
-                    "Error",
-                    templates.error_page(500, "Failed to create batch jobs"),
-                  )
-                  |> html_response(500, _)
+              let youtube =
+                list.filter_map(validated, fn(url) {
+                  youtube_subscription_request(ctx, url)
+                  |> option.to_result(Nil)
+                })
+              let other =
+                list.filter(validated, fn(url) {
+                  youtube_subscription_request(ctx, url) == None
+                })
+              case persist_video_requests(ctx, youtube) {
+                Error(error) -> channel_import_error(error)
+                Ok(_) -> {
+                  // Use batch insert for efficiency (handles 500+ URLs efficiently)
+                  let timestamp = get_timestamp()
+                  case repo.insert_jobs_batch(ctx.db, other, timestamp) {
+                    Ok(inserted_count) -> {
+                      io.println(
+                        "Batch created: "
+                        <> int.to_string(inserted_count)
+                        <> " jobs (from "
+                        <> int.to_string(valid_count)
+                        <> " valid URLs out of "
+                        <> int.to_string(total_count)
+                        <> " total)",
+                      )
+                      // Redirect to queue page to show the new jobs
+                      redirect(to: case youtube {
+                        [] -> "/queue"
+                        _ -> "/subscriptions"
+                      })
+                    }
+                    Error(err) -> {
+                      io.println("Batch insert failed: " <> string.inspect(err))
+                      templates.layout(
+                        "Error",
+                        templates.error_page(500, "Failed to create batch jobs"),
+                      )
+                      |> html_response(500, _)
+                    }
+                  }
                 }
               }
             }
@@ -231,6 +302,52 @@ pub fn create_batch_jobs(req: Request, ctx: Context) -> Response {
       )
       |> html_response(400, _)
     }
+  }
+}
+
+/// One coordinator owns YouTube work, so manual requests cannot race the
+/// subscription pool or bypass its metadata, Plex and idempotency policy.
+fn youtube_subscription_request(
+  ctx: Context,
+  url: String,
+) -> Option(ytdl_sub.Channel) {
+  case ctx.subscription_manager {
+    None -> None
+    Some(_) ->
+      case channel_import.parse_channels(url) {
+        [channel] -> Some(channel)
+        _ -> None
+      }
+  }
+}
+
+fn persist_video_requests(
+  ctx: Context,
+  channels: List(ytdl_sub.Channel),
+) -> Result(Nil, String) {
+  case channels {
+    [] -> Ok(Nil)
+    _ -> {
+      use summary <- result.try(channel_import.add_desired_channels(
+        channels,
+        ytdl_sub.layout_from_env().channels_file,
+      ))
+      case summary.added > 0 {
+        True -> reload_subscription_channels(ctx)
+        False -> Nil
+      }
+      Ok(Nil)
+    }
+  }
+}
+
+fn stage_video_requests(
+  ctx: Context,
+  channels: List(ytdl_sub.Channel),
+) -> Response {
+  case persist_video_requests(ctx, channels) {
+    Ok(_) -> redirect("/subscriptions")
+    Error(error) -> channel_import_error(error)
   }
 }
 
@@ -297,17 +414,37 @@ pub fn about(_req: Request, _ctx: Context) -> Response {
 pub fn settings(_req: Request, ctx: Context) -> Response {
   case repo.get_download_config(ctx.db) {
     Ok(config) -> {
-      templates.layout("Settings", templates.settings_page(config))
+      let config = effective_download_config(config, ctx.output_directory)
+      templates.layout(
+        "Settings",
+        templates.settings_page(config, get_ytdlp_version()),
+      )
       |> html_response(200, _)
     }
     Error(_) -> {
       // Fallback to default config if database read fails
+      let config =
+        effective_download_config(ytdlp.default_config(), ctx.output_directory)
       templates.layout(
         "Settings",
-        templates.settings_page(ytdlp.default_config()),
+        templates.settings_page(config, get_ytdlp_version()),
       )
       |> html_response(200, _)
     }
+  }
+}
+
+fn effective_download_config(
+  config: ytdlp.DownloadConfig,
+  configured_output_directory: String,
+) -> ytdlp.DownloadConfig {
+  case config.output_directory == "./downloads" {
+    True ->
+      ytdlp.DownloadConfig(
+        ..config,
+        output_directory: configured_output_directory,
+      )
+    False -> config
   }
 }
 
@@ -317,7 +454,7 @@ pub fn update_settings(req: Request, ctx: Context) -> Response {
 
   // Parse form fields with defaults
   let output_directory =
-    get_form_string(form_data.values, "output_directory", "./downloads")
+    get_form_string(form_data.values, "output_directory", ctx.output_directory)
   let format =
     get_form_string(
       form_data.values,
@@ -647,6 +784,25 @@ fn get_timestamp() -> Int {
 
 /// Subscriptions page handler - shows subscription settings and recent videos
 pub fn subscriptions(_req: Request, ctx: Context) -> Response {
+  let layout = ytdl_sub.layout_from_env()
+  // Keep the database feed aligned with files already committed by ytdl-sub,
+  // including files from a poll that is still running.
+  let #(_recorded, failed) =
+    subscription_manager.reconcile_library(
+      ctx.db,
+      layout.library_dir,
+      get_timestamp(),
+    )
+  case failed > 0 {
+    True ->
+      io.println(
+        "Subscription library reconciliation could not record "
+        <> int.to_string(failed)
+        <> " files",
+      )
+    False -> Nil
+  }
+
   // Load subscription config
   let config = case subscription_repo.get_config(ctx.db) {
     Ok(c) -> c
@@ -657,8 +813,10 @@ pub fn subscriptions(_req: Request, ctx: Context) -> Response {
   let status = get_subscription_status(ctx)
 
   // Load recent seen videos
-  let recent_videos = case subscription_repo.list_seen_videos(ctx.db, 50, 0) {
-    Ok(videos) -> videos
+  let recent_videos = case
+    subscription_repo.list_downloaded_videos(ctx.db, 200)
+  {
+    Ok(videos) -> list.map(videos, enrich_seen_video)
     Error(_) -> []
   }
 
@@ -667,11 +825,182 @@ pub fn subscriptions(_req: Request, ctx: Context) -> Response {
     templates.subscriptions_page(
       config,
       status,
-      recent_videos,
-      ytdl_sub.layout_from_env().library_dir,
+      library_feed.cards(layout, recent_videos),
+      layout.library_dir,
+      subscription_settings.load(),
+      get_ytdlp_version(),
+      plex_library_url(),
+      subscription_progress.read_snapshots(layout.root),
+      subscription_repo.count_downloaded(ctx.db)
+        |> result.unwrap(list.length(recent_videos)),
     ),
   )
   |> html_response(200, _)
+}
+
+/// Small live fragment polled by the subscriptions page without rescanning the
+/// library or replacing the editable settings form.
+pub fn subscriptions_live(_req: Request, ctx: Context) -> Response {
+  let layout = ytdl_sub.layout_from_env()
+  let root = layout.root
+  let status = get_subscription_status(ctx)
+  let recent_videos = case
+    subscription_repo.list_downloaded_videos(ctx.db, 200)
+  {
+    Ok(videos) -> list.map(videos, enrich_seen_video)
+    Error(_) -> []
+  }
+  templates.subscription_live_fragment(
+    status,
+    library_feed.cards(layout, recent_videos),
+    subscription_progress.read_snapshots(root),
+    subscription_repo.count_downloaded(ctx.db)
+      |> result.unwrap(list.length(recent_videos)),
+  )
+  |> to_document_string
+  |> html_response(200, _)
+}
+
+/// Import channels pasted from YouTube or supplied in channels.txt format.
+pub fn import_subscription_channels(req: Request, ctx: Context) -> Response {
+  use form_data <- wisp.require_form(req)
+  let pasted =
+    form_data.values
+    |> list.find(fn(pair) { pair.0 == "channel_text" })
+    |> result.map(fn(pair) { pair.1 })
+  case pasted {
+    Error(_) ->
+      templates.layout(
+        "Channel import",
+        templates.error_page(400, "Paste a channel list to import."),
+      )
+      |> html_response(400, _)
+    Ok(content) -> {
+      let channels_file = ytdl_sub.layout_from_env().channels_file
+      case channel_import.reconcile_content(content, channels_file) {
+        Ok(ImportSummary(added, removed, found)) -> {
+          reload_subscription_channels(ctx)
+          templates.layout(
+            "Channels imported",
+            templates.channel_import_result(added, list.length(removed), found),
+          )
+          |> html_response(200, _)
+        }
+        Error(err) ->
+          templates.layout("Channel import", templates.error_page(400, err))
+          |> html_response(400, _)
+      }
+    }
+  }
+}
+
+/// Add one URL to the pending desired channel list without replacing it.
+pub fn add_subscription_channel(req: Request, ctx: Context) -> Response {
+  use form_data <- wisp.require_form(req)
+  let url = form_value(form_data.values, "channel_url")
+  let supplied_label = form_value(form_data.values, "channel_label")
+  case url {
+    Error(_) ->
+      channel_import_error("Enter a YouTube channel, playlist, or video URL.")
+    Ok(raw_url) ->
+      case channel_import.parse_channels(raw_url) {
+        [parsed] -> {
+          let label = case supplied_label {
+            Ok(value) -> {
+              let value = string.trim(value)
+              case string.is_empty(value) {
+                True -> parsed.label
+                False -> Some(value)
+              }
+            }
+            _ -> parsed.label
+          }
+          let channel = ytdl_sub.Channel(label, parsed.url)
+          let channels_file = ytdl_sub.layout_from_env().channels_file
+          case channel_import.add_desired_channel(channel, channels_file) {
+            Ok(ImportSummary(added, removed, found)) -> {
+              reload_subscription_channels(ctx)
+              templates.layout(
+                "Channel added",
+                templates.channel_import_result(
+                  added,
+                  list.length(removed),
+                  found,
+                ),
+              )
+              |> html_response(200, _)
+            }
+            Error(err) -> channel_import_error(err)
+          }
+        }
+        _ ->
+          channel_import_error(
+            "Enter one valid YouTube channel, playlist, or video URL.",
+          )
+      }
+  }
+}
+
+fn form_value(
+  values: List(#(String, String)),
+  key: String,
+) -> Result(String, Nil) {
+  values
+  |> list.find(fn(pair) { pair.0 == key })
+  |> result.map(fn(pair) { pair.1 })
+}
+
+fn reload_subscription_channels(ctx: Context) -> Nil {
+  case ctx.subscription_manager {
+    Some(manager) -> process.send(manager, subscription_manager.ReloadChannels)
+    None -> Nil
+  }
+}
+
+fn channel_import_error(message: String) -> Response {
+  templates.layout("Channel import", templates.error_page(400, message))
+  |> html_response(400, _)
+}
+
+fn enrich_seen_video(video: SeenVideo) -> SeenVideo {
+  case string.starts_with(video.url, "file://") {
+    False -> video
+    True -> {
+      let path = string.drop_start(video.url, 7)
+      case simplifile.read(path <> ".info.json") {
+        Error(_) -> video
+        Ok(contents) ->
+          case nfo.parse_info_json(contents) {
+            Error(_) -> video
+            Ok(metadata) ->
+              SeenVideo(
+                ..video,
+                title: metadata.title,
+                channel_name: prefer_option(
+                  video.channel_name,
+                  metadata.channel,
+                ),
+                duration_seconds: prefer_option(
+                  video.duration_seconds,
+                  metadata.duration,
+                ),
+                thumbnail_url: prefer_option(
+                  video.thumbnail_url,
+                  metadata.thumbnail,
+                ),
+                url: option.unwrap(metadata.webpage_url, video.url),
+              )
+          }
+      }
+    }
+  }
+}
+
+fn prefer_option(current: Option(a), fallback: Option(a)) -> Option(a) {
+  case current {
+    Some(_) -> current
+    None -> fallback
+  }
 }
 
 /// Update subscription settings from form submission
@@ -682,6 +1011,11 @@ pub fn update_subscription_config(req: Request, ctx: Context) -> Response {
   let enabled = get_form_bool(form_data.values, "enabled")
   let poll_interval =
     get_form_int(form_data.values, "poll_interval_minutes", 360)
+  let current_settings = subscription_settings.load()
+  let days = get_form_int(form_data.values, "days", current_settings.days)
+  let workers =
+    get_form_int(form_data.values, "workers", current_settings.workers)
+  let skip_restricted = get_form_bool(form_data.values, "skip_restricted")
 
   // Get existing config to preserve last_poll_at
   let existing = case subscription_repo.get_config(ctx.db) {
@@ -698,29 +1032,114 @@ pub fn update_subscription_config(req: Request, ctx: Context) -> Response {
 
   // Save config
   let timestamp = get_timestamp()
-  case subscription_repo.update_config(ctx.db, new_config, timestamp) {
-    Ok(_) -> {
-      // Notify subscription manager of config update
-      case ctx.subscription_manager {
-        Some(manager) -> {
-          process.send(manager, subscription_manager.UpdateConfig(new_config))
-        }
-        None -> Nil
-      }
-
-      io.println("Subscription config updated")
-      redirect(to: "/subscriptions")
-    }
+  case subscription_settings.save(workers, days, skip_restricted) {
     Error(err) -> {
-      io.println(
-        "Failed to update subscription config: " <> string.inspect(err),
-      )
+      io.println("Failed to update subscription runtime settings: " <> err)
       templates.layout(
         "Error",
-        templates.error_page(500, "Failed to update settings"),
+        templates.error_page(500, "Failed to update settings: " <> err),
       )
       |> html_response(500, _)
     }
+    Ok(_) ->
+      case subscription_repo.update_config(ctx.db, new_config, timestamp) {
+        Ok(_) -> {
+          // Notify subscription manager of config update
+          case ctx.subscription_manager {
+            Some(manager) -> {
+              process.send(
+                manager,
+                subscription_manager.UpdateConfig(new_config),
+              )
+            }
+            None -> Nil
+          }
+
+          io.println("Subscription config updated")
+          redirect(to: "/subscriptions")
+        }
+        Error(err) -> {
+          io.println(
+            "Failed to update subscription config: " <> string.inspect(err),
+          )
+          templates.layout(
+            "Error",
+            templates.error_page(500, "Failed to update settings"),
+          )
+          |> html_response(500, _)
+        }
+      }
+  }
+}
+
+fn get_ytdlp_version() -> String {
+  case shell.run("yt-dlp", ["--version"]) {
+    Ok(shell.ShellResult(code, output, _)) if code == 0 -> {
+      let version = string.trim(output)
+      case string.is_empty(version) {
+        True -> "unavailable"
+        False -> version
+      }
+    }
+    _ -> "unavailable"
+  }
+}
+
+fn plex_library_url() -> Option(String) {
+  case envoy.get("PLEX_URL") {
+    Ok(base_url) ->
+      plex_library_url_for(
+        base_url,
+        optional_env("PLEX_MACHINE_ID"),
+        optional_env("PLEX_SECTION_ID"),
+      )
+    Error(_) -> None
+  }
+}
+
+/// Build the native Plex library route when its machine id is configured.
+/// Without one, link to Plex Web itself instead of emitting an invalid route.
+pub fn plex_library_url_for(
+  raw_url: String,
+  machine_id: Option(String),
+  section_id: Option(String),
+) -> Option(String) {
+  let base = trim_trailing_slash(string.trim(raw_url))
+  case string.is_empty(base) {
+    True -> None
+    False ->
+      case machine_id, section_id {
+        Some(machine), Some(section) -> {
+          let machine = string.trim(machine)
+          let section = string.trim(section)
+          case string.is_empty(machine) || string.is_empty(section) {
+            True -> Some(base <> "/web")
+            False ->
+              Some(
+                base
+                <> "/web/index.html#!/media/"
+                <> machine
+                <> "/com.plexapp.plugins.library?source="
+                <> section,
+              )
+          }
+        }
+        _, _ -> Some(base <> "/web")
+      }
+  }
+}
+
+fn optional_env(name: String) -> Option(String) {
+  case envoy.get(name) {
+    Ok(value) -> Some(value)
+    Error(_) -> None
+  }
+}
+
+fn trim_trailing_slash(path: String) -> String {
+  case string.ends_with(path, "/") {
+    True -> trim_trailing_slash(string.drop_end(path, 1))
+    False -> path
   }
 }
 

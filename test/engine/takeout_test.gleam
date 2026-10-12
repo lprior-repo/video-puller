@@ -115,6 +115,16 @@ pub fn import_if_present_merges_and_marks_csv_test() {
     <> "Two, with comma = https://www.youtube.com/@Two\n",
   )
 
+  // Additive Takeout imports update durable desired state too, so the next
+  // reconciliation cannot discard these imported subscriptions.
+  simplifile.read(root <> "/ytdl-sub/desired-channels.txt")
+  |> should.be_ok()
+  |> should.equal(
+    "https://www.youtube.com/@One\n"
+    <> "Channel One = http://www.youtube.com/channel/UCabc123\n"
+    <> "Two, with comma = https://www.youtube.com/@Two\n",
+  )
+
   simplifile.is_file(layout.takeout_file <> ".imported")
   |> should.be_ok()
   |> should.be_true()
@@ -125,6 +135,7 @@ pub fn import_if_present_merges_and_marks_csv_test() {
   |> should.be_none()
 
   let _ = simplifile.delete(layout.channels_file)
+  let _ = simplifile.delete(root <> "/ytdl-sub/desired-channels.txt")
   let _ = simplifile.delete(layout.takeout_file <> ".imported")
   let _ = simplifile.delete(root <> "/ytdl-sub")
   let _ = simplifile.delete(root)

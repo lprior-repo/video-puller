@@ -66,6 +66,96 @@ fn test_video(
   )
 }
 
+pub fn expiration_cleans_old_rows_preserving_boundary_unknown_and_pinned_test() {
+  let conn = setup_test_db("expiration")
+  let fixtures = [
+    #("old", "Keep", Some(100)),
+    #("boundary", "Keep", Some(200)),
+    #("unknown", "Keep", None),
+    #("pinned", "Pinned", Some(100)),
+  ]
+  list.each(fixtures, fn(fixture) {
+    let #(id, channel, date) = fixture
+    let video =
+      subscription_types.DiscoveredVideo(
+        ..test_video(id, id, None),
+        channel_name: Some(channel),
+        published_at: date,
+      )
+    subscription_repo.mark_seen(conn, video, True, None, None, 1)
+    |> should.be_ok()
+  })
+  subscription_repo.remove_expired_videos(conn, ["Keep"], 200) |> should.be_ok()
+  subscription_repo.get_seen_video(conn, "old") |> should.equal(Ok(None))
+  list.each(["boundary", "unknown", "pinned"], fn(id) {
+    subscription_repo.is_seen(conn, id) |> should.equal(Ok(True))
+  })
+  subscription_repo.remove_expired_videos(conn, ["Keep"], 200) |> should.be_ok()
+  subscription_repo.remove_expired_videos(conn, [], 200) |> should.be_ok()
+  cleanup_test_db(conn, "expiration")
+}
+
+pub fn cleanup_replays_database_reconciliation_after_file_deletion_test() {
+  let conn = setup_test_db("cleanup_replay")
+  list.each([#("live", True), #("removed", True), #("pending", False)], fn(row) {
+    subscription_repo.mark_seen(
+      conn,
+      test_video(row.0, row.0, None),
+      row.1,
+      None,
+      None,
+      1,
+    )
+    |> should.be_ok()
+  })
+  subscription_repo.remove_missing_downloads(conn, ["live"]) |> should.be_ok()
+  subscription_repo.get_seen_video(conn, "removed") |> should.equal(Ok(None))
+  subscription_repo.is_seen(conn, "live") |> should.equal(Ok(True))
+  subscription_repo.is_seen(conn, "pending") |> should.equal(Ok(True))
+  subscription_repo.remove_missing_downloads(conn, ["live"]) |> should.be_ok()
+  subscription_repo.remove_missing_downloads(conn, []) |> should.be_ok()
+  subscription_repo.is_seen(conn, "live") |> should.equal(Ok(False))
+  subscription_repo.is_seen(conn, "pending") |> should.equal(Ok(True))
+  cleanup_test_db(conn, "cleanup_replay")
+}
+
+/// Reconciliation enriches old rows without moving them to the top of history.
+pub fn reconcile_refreshes_metadata_preserving_history_test() {
+  let conn = setup_test_db("metadata_refresh")
+  let library = "/tmp/test_subscription_metadata_refresh_library"
+  let folder = library <> "/Test Channel/Season 2026"
+  let _ = simplifile.create_directory_all(folder)
+  let path = folder <> "/s2026.e100101 - Filename title.mp4"
+  let sidecar = folder <> "/s2026.e100101 - Filename title.info.json"
+  let _ = simplifile.write(path, "fixture")
+  let _ =
+    simplifile.write(
+      sidecar,
+      "{\"id\":\"metadata-test\",\"title\":\"Original video title\","
+        <> "\"duration\":123,\"webpage_url\":\"https://www.youtube.com/watch?v=metadata-test\"}",
+    )
+  subscription_repo.mark_seen(
+    conn,
+    test_video("metadata-test", "Old title", None),
+    True,
+    None,
+    Some("original-job"),
+    100,
+  )
+  |> should.be_ok()
+  subscription_manager.reconcile_library(conn, library, 200)
+  |> should.equal(#(0, 0))
+  let assert Ok(Some(video)) =
+    subscription_repo.get_seen_video(conn, "metadata-test")
+  video.title |> should.equal("Original video title")
+  video.duration_seconds |> should.equal(Some(123))
+  video.first_seen_at |> should.equal(100)
+  video.job_id |> should.equal(Some("original-job"))
+  let _ = simplifile.delete(path)
+  let _ = simplifile.delete(sidecar)
+  cleanup_test_db(conn, "metadata_refresh")
+}
+
 /// Get current Unix timestamp in seconds
 fn get_timestamp() -> Int {
   get_system_time(Second)
@@ -243,6 +333,58 @@ pub fn mark_seen_idempotency_test() {
   }
 
   cleanup_test_db(conn, "seen_idempotent")
+}
+
+/// Channel cleanup retains desired feeds and deletes removed-channel rows;
+/// an empty desired list is guarded against destructive cleanup.
+pub fn remove_inactive_channels_preserves_desired_and_refuses_empty_test() {
+  let conn = setup_test_db("remove_inactive_channels")
+  let keep =
+    subscription_types.DiscoveredVideo(
+      video_id: "keep-video",
+      channel_id: None,
+      channel_name: Some("Keep Channel"),
+      title: "Keep video",
+      url: "https://example.com/keep-video",
+      published_at: None,
+      duration_seconds: None,
+      thumbnail_url: None,
+    )
+  let remove =
+    subscription_types.DiscoveredVideo(
+      video_id: "remove-video",
+      channel_id: None,
+      channel_name: Some("Removed Channel"),
+      title: "Removed video",
+      url: "https://example.com/remove-video",
+      published_at: None,
+      duration_seconds: None,
+      thumbnail_url: None,
+    )
+  subscription_repo.mark_seen(conn, keep, True, None, None, 100)
+  |> should.be_ok()
+  subscription_repo.mark_seen(conn, remove, True, None, None, 101)
+  |> should.be_ok()
+
+  subscription_repo.remove_inactive_channels(conn, ["Keep Channel"])
+  |> should.be_ok()
+  subscription_repo.get_seen_video(conn, "keep-video")
+  |> should.be_ok()
+  |> should.be_some()
+  subscription_repo.get_seen_video(conn, "remove-video")
+  |> should.be_ok()
+  |> should.be_none()
+
+  subscription_repo.remove_inactive_channels(conn, [])
+  |> should.be_error()
+  subscription_repo.count_seen_videos(conn)
+  |> should.be_ok()
+  |> should.equal(1)
+  subscription_repo.get_seen_video(conn, "keep-video")
+  |> should.be_ok()
+  |> should.be_some()
+
+  cleanup_test_db(conn, "remove_inactive_channels")
 }
 
 // =============================================================================

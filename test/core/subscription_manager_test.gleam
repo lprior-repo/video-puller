@@ -1,9 +1,15 @@
 /// Deterministic actor lifecycle tests without network or downloader binaries.
 import core/subscription_manager.{type SubscriptionMessage}
-import domain/subscription_types.{type SubscriptionConfig, SubscriptionConfig}
+import domain/subscription_types.{
+  type SubscriptionConfig, type SubscriptionStatus, SubscriptionConfig,
+}
+import engine/shell
 import engine/ytdl_sub
-import gleam/erlang/process.{type Pid, type Subject}
+import envoy
+import gleam/erlang/process.{type Name, type Pid, type Subject}
+import gleam/int
 import gleam/option.{None, Some}
+import gleam/string
 import gleeunit/should
 import infra/db
 import infra/migrator
@@ -161,6 +167,21 @@ fn wait_for_completion(subject: Subject(SubscriptionMessage), attempts: Int) {
   }
 }
 
+fn wait_for_worker_failure(
+  subject: Subject(SubscriptionMessage),
+  attempts: Int,
+) -> SubscriptionStatus {
+  let current = status(subject)
+  case current.is_polling, current.last_result, attempts {
+    False, Some(_), _ -> current
+    _, _, 0 -> panic as "worker crash was not handled before the watchdog"
+    _, _, _ -> {
+      process.sleep(10)
+      wait_for_worker_failure(subject, attempts - 1)
+    }
+  }
+}
+
 pub fn phase_timeouts_never_exceed_remaining_deadline_test() {
   subscription_manager.phase_timeouts(500, 1_800_000)
   |> should.equal(#(125, 375))
@@ -169,3 +190,179 @@ pub fn phase_timeouts_never_exceed_remaining_deadline_test() {
   subscription_manager.phase_timeouts(-1, 1_800_000)
   |> should.equal(#(0, 0))
 }
+
+pub fn next_poll_delay_uses_poll_start_and_clamps_elapsed_test() {
+  subscription_manager.next_poll_delay(1000, 1100, 360)
+  |> should.equal(21_500)
+  subscription_manager.next_poll_delay(1000, 50_000, 360)
+  |> should.equal(1)
+  subscription_manager.next_poll_delay(1000, 900, 360)
+  |> should.equal(21_600)
+  subscription_manager.next_poll_delay(1000, 1000, 0)
+  |> should.equal(60)
+}
+
+pub fn failed_poll_arms_a_short_retry_test() {
+  let #(conn, path) = setup("failed_retry")
+  let runner = fn() { Error("network unavailable") }
+  let subject =
+    subscription_manager.start_with_runner(conn, runner, 30_000)
+    |> should.be_ok()
+  process.send(subject, subscription_manager.UpdateConfig(config(True)))
+  process.send(subject, subscription_manager.Poll)
+  wait_for_completion(subject, 100)
+  let finished = status(subject)
+  let assert Some(last_poll) = finished.last_poll_at
+  let assert Some(next_poll) = finished.next_poll_at
+  next_poll - last_poll |> should.equal(300)
+  let assert Some(result) = finished.last_result
+  result.errors |> should.equal(["network unavailable"])
+  cleanup(subject, conn, path)
+}
+
+pub fn crashed_poll_worker_retries_without_waiting_for_watchdog_test() {
+  let #(conn, path) = setup("worker_crash")
+  let started = process.new_subject()
+  let runner = fn() {
+    process.send(started, Nil)
+    panic as "simulated poll worker crash"
+  }
+  let subject =
+    subscription_manager.start_with_runner(conn, runner, 30_000)
+    |> should.be_ok()
+  process.send(subject, subscription_manager.UpdateConfig(config(True)))
+  process.send(subject, subscription_manager.Poll)
+  process.receive(started, 2000) |> should.be_ok()
+
+  let failed = wait_for_worker_failure(subject, 100)
+  failed.is_polling |> should.be_false()
+  let assert Some(last_poll) = failed.last_poll_at
+  let assert Some(next_poll) = failed.next_poll_at
+  next_poll - last_poll |> should.equal(300)
+  let assert Some(result) = failed.last_result
+  case result.errors {
+    [error] ->
+      string.starts_with(error, "subscription poll worker exited:")
+      |> should.be_true()
+    _ -> should.fail()
+  }
+  cleanup(subject, conn, path)
+}
+
+pub fn successful_partial_poll_keeps_regular_cadence_test() {
+  let #(conn, path) = setup("partial_errors")
+  let runner = fn() {
+    Ok(ytdl_sub.PullSummary(0, [], ["one private video was skipped"]))
+  }
+  let subject =
+    subscription_manager.start_with_runner(conn, runner, 30_000)
+    |> should.be_ok()
+  process.send(subject, subscription_manager.UpdateConfig(config(True)))
+  process.send(subject, subscription_manager.Poll)
+  wait_for_completion(subject, 100)
+  let finished = status(subject)
+  let assert Some(last_poll) = finished.last_poll_at
+  let assert Some(next_poll) = finished.next_poll_at
+  let delay = next_poll - last_poll
+  should.be_true(delay >= 21_000 && delay <= 21_600)
+  let assert Some(result) = finished.last_result
+  result.errors |> should.equal(["one private video was skipped"])
+  cleanup(subject, conn, path)
+}
+
+type PollStarted {
+  PollStarted(root_pid: String, child_pid: String)
+}
+
+pub fn named_manager_restart_waits_for_old_downloader_cleanup_test() {
+  let #(conn, db_path) = setup("named_restart_cleanup")
+  let root = new_pid_file() <> "-named-manager"
+  let executable = root <> "/yt-dlp"
+  let data_dir = root <> "/data"
+  let old_data_dir = envoy.get("DATA_DIR")
+  let _ = simplifile.create_directory_all(root)
+  let _ =
+    simplifile.write(
+      executable,
+      "#!/bin/sh\nsleep 60 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\"\nwait\n",
+    )
+  let _ = shell.run("chmod", ["+x", executable])
+  let _ = set_env("DATA_DIR", data_dir)
+
+  let name: Name(SubscriptionMessage) =
+    process.new_name(prefix: "test_named_subscription_manager")
+  let started = process.new_subject()
+  let runner = fn() {
+    case shell.open_stream(executable, []) {
+      Error(_) -> Error("could not open fake downloader")
+      Ok(stream) -> {
+        let pid_line = case shell.read_stream_line(stream) {
+          shell.OutputLine(line) -> line
+          _ -> ""
+        }
+        case string.split(pid_line, " ") {
+          [root_pid, child_pid] -> {
+            process.send(started, PollStarted(root_pid, child_pid))
+            case shell.read_stream_line(stream) {
+              shell.StreamError(message) -> Error(message)
+              shell.EndOfStream -> Error("fake downloader ended")
+              shell.ProcessExit(code) ->
+                Error("fake downloader exit " <> int.to_string(code))
+              shell.OutputLine(_) -> Error("unexpected fake downloader output")
+            }
+          }
+          _ -> Error("fake downloader did not report its pids")
+        }
+      }
+    }
+  }
+  let manager =
+    subscription_manager.start_named_with_runner(conn, name, runner, 30_000)
+    |> should.be_ok()
+  process.send(manager, subscription_manager.UpdateConfig(config(True)))
+  process.send(manager, subscription_manager.Poll)
+  let assert Ok(PollStarted(root_pid, child_pid)) =
+    process.receive(started, 3000)
+  process_running(root_pid) |> should.be_true()
+  process_running(child_pid) |> should.be_true()
+
+  // Simulate a manager crash. The stable-name restart must block until its
+  // guardian has stopped the worker and verified downloader process tree.
+  let assert Ok(old_manager_pid) = process.named(name)
+  process.unlink(old_manager_pid)
+  process.kill(old_manager_pid)
+  let restarted =
+    subscription_manager.start_named(conn, name)
+    |> should.be_ok()
+  process_running(root_pid) |> should.be_false()
+  process_running(child_pid) |> should.be_false()
+  status(restarted).is_polling |> should.be_false()
+
+  cleanup(restarted, conn, db_path)
+  case old_data_dir {
+    Ok(value) -> {
+      let _ = set_env("DATA_DIR", value)
+      Nil
+    }
+    Error(_) -> {
+      let _ = unset_env("DATA_DIR")
+      Nil
+    }
+  }
+  let _ = delete_tree(root)
+}
+
+@external(erlang, "shell_test_ffi", "set_env")
+fn set_env(name: String, value: String) -> Bool
+
+@external(erlang, "shell_test_ffi", "unset_env")
+fn unset_env(name: String) -> Bool
+
+@external(erlang, "shell_test_ffi", "process_running")
+fn process_running(pid: String) -> Bool
+
+@external(erlang, "shell_test_ffi", "new_pid_file")
+fn new_pid_file() -> String
+
+@external(erlang, "shell_test_ffi", "delete_tree")
+fn delete_tree(path: String) -> Bool

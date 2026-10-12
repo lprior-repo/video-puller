@@ -59,6 +59,107 @@ Then open:
 - <http://localhost:8080/subscriptions> — subscription pulls: enable them, set
   the cadence, import channels, trigger a poll and see what arrived
 
+### Automated Plex subscriptions
+
+The Gleam subscription worker runs `ytdl-sub` directly in a bounded BEAM pool.
+Set `SUBSCRIPTION_WORKERS=8` and `SUBSCRIPTION_DAYS=30` to download the last
+30 days from eight channels at a time. Change these values on the Subscriptions
+page; they persist under `DATA_DIR/ytdl-sub/runtime.json` and apply to the next
+poll. Set `POLL_ON_START=true` to resume polling immediately after service
+startup. Each channel has its own working directory, while its Plex archive stays
+inside the existing show directory, so retries do not download it twice.
+
+“Sync channel list” treats pasted YouTube subscriptions as the complete desired
+set. Gleam saves it atomically in `ytdl-sub/desired-channels.txt`, stops the
+current poll, and reconciles immediately and again before every poll and at
+startup. Missing channels are added; removed channels stop downloading and
+leave the feed. Their managed media and archives move to `retired-library/`
+on the same data disk, outside Plex's library. Readding a channel restores its
+files and archive. Empty imports and conflicting destinations are rejected.
+“Add channel” appends to this desired set without removing existing channels.
+The coordinator checks persisted desired state every 30 seconds. A separate
+Gleam loop restores original Plex titles every 30 seconds after asynchronous
+Plex scans finish. It detects completed files missing from Plex and retries
+scanning after Plex becomes available, logging failures and recovery without
+printing credentials. A compact metadata cache avoids repeatedly parsing
+large sidecars; it invalidates when the source size or modification time changes.
+
+At startup and before each scheduled poll, rolling retention deletes channel
+episodes older than `SUBSCRIPTION_DAYS` and their episode sidecars, then removes
+expired feed records and refreshes Plex. It keeps download archives, artwork,
+unknown-date files, and explicit single-video requests. Zero days disables
+retention. The cutoff is midnight UTC minus the selected number of days.
+
+Polling uses Erlang timers with a cadence measured from poll start; work is
+capped below the interval so a backlog cannot postpone the next cycle.
+Whole-poll failures retry in five minutes. Partial failures retain the normal
+cadence, and completed files and download archives survive retries.
+
+Global download history lives in `ytdl-sub/download-history/archive.txt`,
+separate from disposable caches. It records completed YouTube IDs durably and
+imports existing per-show archives, including retired shows. Each downloader
+receives a private snapshot because ytdl-sub restores its supplied raw archive
+after a URL completes. Explicit videos, playlists, and unresolved channel
+identities run serially before the independent channel pool, preventing overlap
+races. Manual YouTube requests join the same coordinator; equivalent watch,
+short, live, embed and youtu.be URLs share one video identity. A malformed
+manifest or unreadable history stops work instead of bypassing deduplication.
+
+At startup and before each six-hour poll, Plex episodes with a positive
+`viewCount` are removed from the managed library with their episode sidecars.
+Completion history is synced before unlinking, so cleanup cannot cause a later
+redownload. Partially watched videos and active/paused playback sessions remain. Missing or unreachable Plex causes
+watched cleanup to skip and retry later. Age retention also preserves explicit
+requests found in ordinary channel folders. Cleanup can run below the free-space
+reserve on the UUID-verified external drive; downloads remain blocked until
+the reserve is recovered.
+
+The separate native macOS hang watchdog's portable Gleam/Erlang source and
+tests are in `deploy/macos/watchdog`. It validates process ownership and job
+configuration, observes bounded grace/retry/cooldown periods, and lets launchd
+restart a frozen or repeatedly unhealthy VM. Its state and credentials are not
+part of the repository.
+
+“Skip members-only / premium videos” defaults to enabled and persists with
+the other subscription settings. Its non-breaking availability filter excludes
+premium-only and subscriber-only entries while permitting public, unlisted,
+and unknown availability; extraction-time restrictions may still be reported.
+The subscription grid uses original thumbnails, titles, channel/date/duration,
+saved descriptions and view counts, with direct links to each indexed Plex
+episode. View counts reflect the saved metadata, not a live YouTube counter.
+
+The application runs under an OTP `RestForOne` supervisor, ordered as storage
+guard, download manager and pool, named subscription actor, Mist HTTP
+supervisor, and Plex synchronizer. An upstream child failure restarts its
+dependent services; the web context resolves the replacement subscription
+actor through its stable name. Poll-worker monitors detect crashes immediately
+and schedule a five-minute retry. The download manager has a bounded mailbox
+health check, and `/health` returns 503 if the subscription actor is unresponsive.
+Restart intensity is bounded to ten restarts per minute; launchd restarts the
+VM if the supervisor gives up. Startup reaps only fingerprint-verified orphan
+download processes before starting new work. The macOS LaunchAgent starts at
+login; FileVault still requires unlocking the Mac after a cold boot.
+
+The supervision integration test starts the actual application tree and kills
+the subscription actor and HTTP supervisor, verifying replacement actors and
+recovered HTTP routes while the upstream download service remains running.
+
+The Plex preset saves H.264/AAC MP4, the original video title, upload date,
+description, show/genre tags, chapter markers, artwork, episode thumbnails,
+full `.info.json` metadata, and available English/original-language SRT captions
+(both embedded and as sidecars). Completed channels update the database and
+refresh Plex during the poll. Configure `PLEX_URL=http://127.0.0.1:32400` and
+`PLEX_SECTION_ID` to your YouTube library's section ID. The local Plex credential
+is used only inside Erlang and is never displayed in the UI.
+
+For an external drive, set `STORAGE_VOLUME` to its mount path,
+`STORAGE_VOLUME_UUID` to its actual volume UUID, and `MIN_FREE_GB=50`.
+Gleam checks the disk before startup and every five seconds; it stops downloader
+processes if the disk disappears, changes identity, or falls below the reserve.
+Store `DATA_DIR`, `DB_PATH`, `OUTPUT_DIR`, and `TMPDIR` on that external drive.
+The LaunchAgent starts the Gleam shipment directly; no Python coordinator is
+needed (`ytdl-sub` itself retains its normal Python runtime).
+
 ### Run it (service)
 
 - Linux: `sudo ./deploy/install.sh` — systemd unit, data in
@@ -214,11 +315,12 @@ The application can be configured using the following environment variables:
 ### Subscription Pulls
 
 Subscriptions pull public channel URLs straight from YouTube with `ytdl-sub`; they
-never read browser cookies and run one channel at a time.
+never read browser cookies. Gleam schedules a bounded pool of channel workers,
+owns both polling passes, records downloads, and refreshes Plex.
 
 Every poll runs the engine twice over the same channel list: a **recent pass**
 that inspects only the newest uploads of each channel, then a **backfill pass**
-that works through the full history. A fresh upload is therefore picked up on
+that works through remaining uploads within the configured age limit. A fresh upload is therefore picked up on
 the next poll even while a long first backfill is still running.
 
 | Variable | Description | Default | Required |
@@ -228,6 +330,24 @@ the next poll even while a long first backfill is still running.
 | `POLL_TIMEOUT_MINUTES` | Total deadline for one poll, both passes included | `360` | No |
 | `RECENT_VIDEOS` | Newest uploads the recent pass checks per channel | `5` | No |
 | `RECENT_PHASE_MINUTES` | Budget cap for the recent pass (never more than a quarter of the poll) | `30` | No |
+| `SUBSCRIPTION_WORKERS` | Simultaneous channel workers, configurable from 1 to 16 in the UI | `1` (`8` in macOS installer) | No |
+| `SUBSCRIPTION_DAYS` | Upload age limit for both passes; 0 means full history | `0` (`30` in macOS installer) | No |
+| `SUBSCRIPTION_SKIP_RESTRICTED` | Skip videos marked premium-only or subscriber-only by yt-dlp; missing availability metadata passes | `true` | No |
+| `POLL_ON_START` | Start an enabled subscription poll immediately at startup | `false` (`true` in macOS installer) | No |
+| `STORAGE_VOLUME` | Optional mounted volume required before startup and during downloads | unset | No |
+| `STORAGE_VOLUME_UUID` | Expected volume identity, preventing writes to a different disk | unset | No |
+| `MIN_FREE_GB` | Stop downloads when the required volume drops below this free-space reserve | `50` | No |
+| `PLEX_URL` | Optional local Plex server URL | unset | No |
+| `PLEX_SECTION_ID` | Plex library section to refresh and enrich | unset | No |
+
+The Subscriptions UI saves worker, age and restricted-video settings in
+`${DATA_DIR}/ytdl-sub/runtime.json`; changes apply to the next poll. Older
+runtime files without `skip_restricted` default to `true`. Native
+Gleam callbacks publish live channel and transfer status, and completed files
+appear in the feed after each worker finishes. Media, archives, working files,
+and caches remain under the configured data volume. The storage guard checks
+the mounted disk identity and free space every five seconds and stops the
+downloader process trees if the required disk becomes unavailable.
 
 ```bash
 # One public channel URL per line; blank lines and # comments are ignored
@@ -251,20 +371,18 @@ to one subscription; a query that selects the content (`?v=`, `?list=`) is
 preserved while decorative queries and fragments are dropped.
 
 Videos land in `${DATA_DIR:-./data}/library/<Channel>/Season <Year>/`. The first
-poll pulls the channel's full upload history; ytdl-sub's per-channel download
+poll pulls uploads within `SUBSCRIPTION_DAYS` (full history when zero); ytdl-sub's per-channel download
 archive under the library root keeps later polls incremental, so only new
 uploads are fetched. A long first backfill does not hold up new uploads: each
 poll's recent pass inspects the newest uploads before the backfill resumes
 where its own deadline stopped it, so set `POLL_TIMEOUT_MINUTES` to the time
 you are happy to have the engine running per poll.
 
-Observed limits: the engine downloads one video at a time and throttle
-protection sleeps ~17s between downloads and ~0.75s between requests, so a
-poll clears a handful of long recordings, and a 75-channel list takes several
-six-hourly polls to backfill. Files are large — a two-channel test landed four
-recordings (72–281MB, 545MB total) in one four-minute poll — and subscription
-pulls have no size cap, so watch free space (`DATA_DIR`'s filesystem held
-523GB free when this was measured). Subscription pulls use ytdl-sub's
+Each channel downloads one video at a time; `SUBSCRIPTION_WORKERS` bounds how
+many channels run concurrently. Source request pacing remains enabled, and
+video conversion can limit throughput even on a fast connection. Files can be
+large; the storage guard preserves `MIN_FREE_GB` when a volume is configured.
+Subscription pulls use ytdl-sub's
 "Plex TV Show by Date" preset with its resolution assert disabled: the assert
 aborts on any download below 361p, which false-positives on genuinely low-res
 uploads rather than throttling. Throttle protection's request pacing stays on,
@@ -329,14 +447,19 @@ Ready-for-Plex checklist:
 2. Every episode is an mp4/h264 file with embedded tags (`title`, `date`,
    `genre`, `synopsis`, `show`), so Plex has metadata even before it fetches
    anything online; chapters are embedded when the source provides them.
+   Source video titles are retained, alongside full info JSON, artwork,
+   thumbnails, and available English/original-language captions as SRT sidecars
+   and embedded subtitles.
 3. Plex must be able to read the tree. The bundled Linux installer leaves the
    data root mode 711 (traversable, not listable) with `library/` at 755, so a
    Plex server running as another user can read the shows while the database
    stays private. On macOS the LaunchAgent runs as your user, so nothing extra
    is needed.
-4. Plex picks new episodes up on a library scan; the app never talks to Plex.
-   Because polls update the library in place — and a poll that times out still
-   records the files it downloaded — scanning after a poll is enough.
+4. With `PLEX_URL` and `PLEX_SECTION_ID` configured, Gleam requests a library
+   refresh and restores source video titles for indexed episodes after each
+   channel and at startup. The local macOS Plex token is read in memory from
+   Plex preferences. Enable Plex's automatic scans to index files promptly.
+   Without the optional connection, Plex can scan the same library normally.
 
 ### macOS (Plex server)
 

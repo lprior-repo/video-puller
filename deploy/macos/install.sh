@@ -16,6 +16,15 @@ PORT="${PORT:-8080}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/video-puller}"
 DATA_DIR="${DATA_DIR:-$HOME/PlexMedia/YouTube}"
 POLL_TIMEOUT_MINUTES="${POLL_TIMEOUT_MINUTES:-720}"
+SUBSCRIPTION_WORKERS="${SUBSCRIPTION_WORKERS:-8}"
+SUBSCRIPTION_DAYS="${SUBSCRIPTION_DAYS:-30}"
+POLL_ON_START="${POLL_ON_START:-true}"
+STORAGE_VOLUME="${STORAGE_VOLUME:-}"
+STORAGE_VOLUME_UUID="${STORAGE_VOLUME_UUID:-}"
+MIN_FREE_GB="${MIN_FREE_GB:-50}"
+PLEX_URL="${PLEX_URL:-http://127.0.0.1:32400}"
+PLEX_SECTION_ID="${PLEX_SECTION_ID:-}"
+PLEX_MACHINE_ID="${PLEX_MACHINE_ID:-}"
 PLIST_DIR="${PLIST_DIR:-$HOME/Library/LaunchAgents}"
 LABEL="local.video-puller"
 PLIST="$PLIST_DIR/$LABEL.plist"
@@ -119,7 +128,7 @@ fi
 
 LIBRARY_DIR="$DATA_DIR/library"
 info "Preparing data directory $DATA_DIR"
-mkdir -p "$DATA_DIR/logs" "$LIBRARY_DIR"
+mkdir -p "$DATA_DIR/logs" "$DATA_DIR/tmp" "$LIBRARY_DIR"
 
 info "Writing LaunchAgent $PLIST"
 mkdir -p "$PLIST_DIR"
@@ -166,6 +175,28 @@ cat > "$TEMP_PLIST" <<PLIST
     <string>$XML_STATIC_DIR</string>
     <key>POLL_TIMEOUT_MINUTES</key>
     <string>$XML_POLL_TIMEOUT</string>
+    <key>SUBSCRIPTION_WORKERS</key>
+    <string>$(xml_escape "$SUBSCRIPTION_WORKERS")</string>
+    <key>POLL_ON_START</key>
+    <string>$(xml_escape "$POLL_ON_START")</string>
+    <key>SUBSCRIPTION_DAYS</key>
+    <string>$(xml_escape "$SUBSCRIPTION_DAYS")</string>
+    <key>MIN_FREE_GB</key>
+    <string>$(xml_escape "$MIN_FREE_GB")</string>
+    <key>STORAGE_VOLUME</key>
+    <string>$(xml_escape "$STORAGE_VOLUME")</string>
+    <key>STORAGE_VOLUME_UUID</key>
+    <string>$(xml_escape "$STORAGE_VOLUME_UUID")</string>
+    <key>PLEX_URL</key>
+    <string>$(xml_escape "$PLEX_URL")</string>
+    <key>PLEX_SECTION_ID</key>
+    <string>$(xml_escape "$PLEX_SECTION_ID")</string>
+    <key>PLEX_MACHINE_ID</key>
+    <string>$(xml_escape "$PLEX_MACHINE_ID")</string>
+    <key>OUTPUT_DIR</key>
+    <string>$XML_DATA_DIR/downloads</string>
+    <key>TMPDIR</key>
+    <string>$XML_DATA_DIR/tmp</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -224,8 +255,8 @@ Next steps:
   1. Add channel URLs to the channel list, then press "Refresh Now" in the UI.
      Or drop a Google Takeout subscriptions.csv beside it to import your
      channels without signing in.
-     The first poll pulls each channel's full upload history; later polls only
-     fetch new uploads, so give large channels time and keep
+     The first poll pulls uploads within SUBSCRIPTION_DAYS ($SUBSCRIPTION_DAYS);
+     zero selects full history. Later polls skip archived downloads. Keep
      POLL_TIMEOUT_MINUTES ($POLL_TIMEOUT_MINUTES) generous.
   2. In Plex, add "$LIBRARY_DIR" as a TV Shows library.
   3. Enable automatic polling on the Subscriptions page.

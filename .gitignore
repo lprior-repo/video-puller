@@ -32,3 +32,6 @@ Thumbs.db
 # Runtime data (local database and download output)
 /data/
 /downloads/
+
+# Local deployment diagnostics and verification fixtures
+/work/

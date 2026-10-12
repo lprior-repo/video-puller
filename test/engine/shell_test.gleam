@@ -1,8 +1,12 @@
 /// Tests for the shell execution primitive
 import engine/shell
+import envoy
+import gleam/list
+import gleam/result
 import gleam/string
 import gleeunit
 import gleeunit/should
+import simplifile
 
 pub fn main() {
   gleeunit.main()
@@ -179,3 +183,103 @@ pub fn run_with_timeout_kills_grandchildren_test() {
 pub fn killed_stream_owner_does_not_orphan_children_test() {
   guardian_kills_tree() |> should.be_true()
 }
+
+pub fn orphan_recovery_verifies_owner_and_process_fingerprints_test() {
+  let root = new_pid_file() <> "-registry"
+  let data_dir = root <> "/data"
+  let registry_dir = data_dir <> "/run/processes"
+  let executable = root <> "/yt-dlp"
+  let malformed_record = registry_dir <> "/malformed.record"
+  let old_data_dir = envoy.get("DATA_DIR")
+  let _ = simplifile.create_directory_all(root)
+  let _ =
+    simplifile.write(
+      executable,
+      "#!/bin/sh\nsleep 60 &\nchild=$!\nprintf '%s %s\\n' \"$$\" \"$child\"\nwait\n",
+    )
+  let _ = shell.run("chmod", ["+x", executable])
+  let _ = set_env("DATA_DIR", data_dir)
+
+  case shell.open_stream(executable, []) {
+    Error(_) -> should.fail()
+    Ok(stream) -> {
+      let pids = case shell.read_stream_line(stream) {
+        shell.OutputLine(value) -> value
+        _ -> ""
+      }
+      case string.split(pids, " ") {
+        [root_pid, child_pid] -> {
+          process_running(root_pid) |> should.be_true()
+          process_running(child_pid) |> should.be_true()
+
+          // A live owner keeps its downloader running during a startup scan.
+          shell.recover_orphan_downloads() |> should.equal(0)
+          process_running(root_pid) |> should.be_true()
+
+          let _ = simplifile.write(malformed_record, "not a registry record\n")
+          shell.recover_orphan_downloads() |> should.equal(0)
+          simplifile.is_file(malformed_record) |> should.equal(Ok(True))
+
+          let record =
+            simplifile.read_directory(registry_dir)
+            |> result.unwrap([])
+            |> list.find(fn(name) {
+              name != "malformed.record" && string.ends_with(name, ".record")
+            })
+            |> result.unwrap("")
+          let record_path = registry_dir <> "/" <> record
+          let contents = simplifile.read(record_path) |> result.unwrap("")
+          let stale_owner =
+            contents
+            |> string.split("\n")
+            |> list.map(fn(line) {
+              case string.starts_with(line, "vm_pid=") {
+                True -> "vm_pid=2147483647"
+                False ->
+                  case string.starts_with(line, "vm_fp=") {
+                    True ->
+                      "vm_fp=0000000000000000000000000000000000000000000000000000000000000000"
+                    False -> line
+                  }
+              }
+            })
+            |> string.join("\n")
+          let _ = simplifile.write(record_path, stale_owner)
+
+          // Only the registered root with matching birth/command hashes is killed.
+          shell.recover_orphan_downloads() |> should.equal(1)
+          process_running(root_pid) |> should.be_false()
+          process_running(child_pid) |> should.be_false()
+          simplifile.is_file(record_path) |> should.equal(Ok(False))
+          simplifile.is_file(malformed_record) |> should.equal(Ok(True))
+          shell.close_stream(stream)
+        }
+        _ -> should.fail()
+      }
+    }
+  }
+
+  case old_data_dir {
+    Ok(value) -> {
+      let _ = set_env("DATA_DIR", value)
+      Nil
+    }
+    Error(_) -> {
+      let _ = unset_env("DATA_DIR")
+      Nil
+    }
+  }
+  let _ = delete_tree(root)
+}
+
+@external(erlang, "shell_test_ffi", "set_env")
+fn set_env(name: String, value: String) -> Bool
+
+@external(erlang, "shell_test_ffi", "unset_env")
+fn unset_env(name: String) -> Bool
+
+@external(erlang, "shell_test_ffi", "process_running")
+fn process_running(pid: String) -> Bool
+
+@external(erlang, "shell_test_ffi", "delete_tree")
+fn delete_tree(path: String) -> Bool

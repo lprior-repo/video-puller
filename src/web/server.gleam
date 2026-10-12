@@ -9,6 +9,9 @@ import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option}
+import gleam/otp/actor
+import gleam/otp/static_supervisor.{type Supervisor}
+import gleam/otp/supervision
 import gleam/string
 import infra/db.{type Db}
 import mist
@@ -71,6 +74,39 @@ pub fn start_with_subscription(
       Error("Failed to start web server")
     }
   }
+}
+
+/// Create the HTTP server as a restartable OTP supervisor child.
+pub fn supervised(
+  db: Db,
+  subscription_manager: Subject(SubscriptionMessage),
+) -> supervision.ChildSpecification(Supervisor) {
+  supervision.supervisor(fn() { start_supervised(db, subscription_manager) })
+}
+
+/// Start Mist and return its actual supervisor handle to the parent tree.
+pub fn start_supervised(
+  db: Db,
+  subscription_manager: Subject(SubscriptionMessage),
+) -> Result(actor.Started(Supervisor), actor.StartError) {
+  let port = get_env_int("PORT", 8080)
+  let static_dir = get_env_string("STATIC_DIR", "./priv/static")
+  let output_dir = get_env_string("OUTPUT_DIR", "./downloads")
+  let secret_key = get_env_string("SECRET_KEY", generate_secret_key())
+  wisp.configure_logger()
+  let ctx =
+    middleware.new_context_with_subscription(
+      db,
+      static_dir,
+      output_dir,
+      subscription_manager,
+    )
+  let handler = fn(req) { router.handle_request(req, ctx) }
+  io.println("🌐 Starting web server on port " <> int.to_string(port))
+  wisp_mist.handler(handler, secret_key)
+  |> mist.new
+  |> mist.port(port)
+  |> mist.start
 }
 
 /// Get string from environment with default fallback

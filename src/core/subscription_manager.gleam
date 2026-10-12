@@ -1,29 +1,39 @@
 /// Subscription Manager Actor
 ///
 /// OTP actor that owns the subscription download schedule. Each poll runs the
-/// ytdl-sub engine over the configured public channel list, one download at a
-/// time, and records what arrived in the library.
+/// ytdl-sub engine over the configured public channel list using bounded
+/// workers, and records what arrived in the library.
+import core/channel_reconciler
 import domain/subscription_types.{
   type PollResult, type SubscriptionConfig, type SubscriptionStatus, PollResult,
   SubscriptionConfig, SubscriptionStatus,
 }
+import engine/channel_import
 import engine/takeout
 import engine/ytdl_sub
 import envoy
-import gleam/erlang/process.{type Pid, type Subject, type Timer}
+import gleam/erlang/process.{
+  type Down, type Monitor, type Name, type Pid, type Subject, type Timer,
+}
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
+import gleam/string
 import infra/db.{type Db}
+import infra/plex
 import infra/subscription_repo
 
 /// Messages the subscription manager can receive
 pub type SubscriptionMessage {
   /// Trigger an immediate poll
   Poll
+  /// Apply a new desired channel list, stopping outdated workers first.
+  ReloadChannels
+  /// Internal: converge changes made to the persisted desired file.
+  CheckDesiredChannels
   /// Internal: the scheduled poll timer fired
   ScheduledPoll(generation: Int)
   /// Internal: the poll worker did not report back within its budget
@@ -38,6 +48,8 @@ pub type SubscriptionMessage {
   SetSelf(Subject(SubscriptionMessage))
   /// Internal: a background pull finished
   PollFinished(generation: Int, outcome: Result(ytdl_sub.PullSummary, String))
+  /// Internal: the poll worker crashed without reporting a result
+  PollWorkerDown(generation: Int, down: Down)
 }
 
 /// Internal state of the subscription manager
@@ -48,6 +60,8 @@ pub opaque type SubscriptionState {
     last_result: Option(PollResult),
     is_polling: Bool,
     next_poll_at: Option(Int),
+    /// Cadence is measured from the poll start, not its completion.
+    poll_started_at: Option(Int),
     self: Option(Subject(SubscriptionMessage)),
     /// Exactly one timer chain exists: arming cancels the previous timer and
     /// bumps the generation, so a message already in flight is ignored
@@ -58,14 +72,61 @@ pub opaque type SubscriptionState {
     /// Poll identity is independent of settings changes and schedule timers
     poll_generation: Int,
     worker: Option(Pid),
+    worker_monitor: Option(Monitor),
+    poll_guard_name: Option(Name(SubscriptionMessage)),
     run_poll: fn() -> Result(ytdl_sub.PullSummary, String),
     watchdog_ms: Int,
+    reconcile_pending: Bool,
   )
 }
 
 /// Start the subscription manager actor
 pub fn start(db: Db) -> Result(Subject(SubscriptionMessage), actor.StartError) {
-  start_with_runner(db, run_pull_worker, pull_timeout_ms() + 120_000)
+  let interval = case subscription_repo.get_config(db) {
+    Ok(config) -> config.poll_interval_minutes
+    Error(_) -> subscription_types.default_config().poll_interval_minutes
+  }
+  start_with_runner_internal(
+    db,
+    fn() { run_pull_worker(db) },
+    effective_pull_timeout_ms(interval) + 120_000,
+    None,
+  )
+}
+
+/// Start a named manager whose subject remains valid across supervisor restarts.
+/// Before reusing its name, wait for any previous manager's poll worker and
+/// downloader process tree to finish cleanup.
+pub fn start_named(
+  db: Db,
+  name: Name(SubscriptionMessage),
+) -> Result(Subject(SubscriptionMessage), actor.StartError) {
+  let interval = case subscription_repo.get_config(db) {
+    Ok(config) -> config.poll_interval_minutes
+    Error(_) -> subscription_types.default_config().poll_interval_minutes
+  }
+  start_named_with_runner(
+    db,
+    name,
+    fn() { run_pull_worker(db) },
+    effective_pull_timeout_ms(interval) + 120_000,
+  )
+}
+
+/// Named variant with an injectable poll runner for deterministic lifecycle tests.
+pub fn start_named_with_runner(
+  db: Db,
+  name: Name(SubscriptionMessage),
+  run_poll: fn() -> Result(ytdl_sub.PullSummary, String),
+  watchdog_ms: Int,
+) -> Result(Subject(SubscriptionMessage), actor.StartError) {
+  case await_previous_poll_cleanup(name) {
+    False ->
+      Error(actor.InitFailed("previous subscription poll cleanup timed out"))
+    True -> {
+      start_with_runner_internal(db, run_poll, watchdog_ms, Some(name))
+    }
+  }
 }
 
 /// Start with an injectable poll runner and watchdog deadline.
@@ -77,6 +138,15 @@ pub fn start_with_runner(
   db: Db,
   run_poll: fn() -> Result(ytdl_sub.PullSummary, String),
   watchdog_ms: Int,
+) -> Result(Subject(SubscriptionMessage), actor.StartError) {
+  start_with_runner_internal(db, run_poll, watchdog_ms, None)
+}
+
+fn start_with_runner_internal(
+  db: Db,
+  run_poll: fn() -> Result(ytdl_sub.PullSummary, String),
+  watchdog_ms: Int,
+  poll_guard_name: Option(Name(SubscriptionMessage)),
 ) -> Result(Subject(SubscriptionMessage), actor.StartError) {
   let config = case subscription_repo.get_config(db) {
     Ok(c) -> c
@@ -90,20 +160,28 @@ pub fn start_with_runner(
       last_result: None,
       is_polling: False,
       next_poll_at: None,
+      poll_started_at: None,
       self: None,
       timer: None,
       watchdog: None,
       schedule_generation: 0,
       poll_generation: 0,
       worker: None,
+      worker_monitor: None,
+      poll_guard_name: poll_guard_name,
       run_poll: run_poll,
       watchdog_ms: int.max(watchdog_ms, 1),
+      reconcile_pending: False,
     )
 
-  actor.start(
+  let builder =
     actor.new(state)
-    |> actor.on_message(handle_message),
-  )
+    |> actor.on_message(handle_message)
+  let builder = case poll_guard_name {
+    Some(name) -> actor.named(builder, name)
+    None -> builder
+  }
+  actor.start(builder)
   |> result.map(fn(started) {
     let subject = started.data
     process.send(subject, SetSelf(subject))
@@ -117,6 +195,58 @@ fn handle_message(
   message: SubscriptionMessage,
 ) -> actor.Next(SubscriptionState, SubscriptionMessage) {
   case message {
+    CheckDesiredChannels -> {
+      case state.self {
+        Some(subject) -> {
+          let _ = process.send_after(subject, 30_000, CheckDesiredChannels)
+          case
+            channel_import.has_pending_changes(
+              ytdl_sub.layout_from_env().channels_file,
+            )
+          {
+            Ok(True) -> process.send(subject, ReloadChannels)
+            Ok(False) ->
+              case state.reconcile_pending && !state.is_polling {
+                True -> process.send(subject, ReloadChannels)
+                False -> Nil
+              }
+            Error(message) ->
+              io.println("Desired channels invalid: " <> message)
+          }
+        }
+        None -> Nil
+      }
+      actor.continue(state)
+    }
+    ReloadChannels -> {
+      let stopped = disarm_watchdog(disarm_timer(state))
+      stop_active_worker(stopped)
+      let stopped =
+        SubscriptionState(
+          ..stopped,
+          is_polling: False,
+          worker: None,
+          worker_monitor: None,
+          reconcile_pending: True,
+        )
+      case stopped.config.enabled {
+        True -> start_poll(stopped)
+        False -> {
+          let reconciled = case
+            channel_reconciler.reconcile(stopped.db, ytdl_sub.layout_from_env())
+          {
+            Ok(_) -> True
+            Error(message) -> {
+              io.println("Channel reconciliation failed: " <> message)
+              False
+            }
+          }
+          actor.continue(
+            SubscriptionState(..stopped, reconcile_pending: !reconciled),
+          )
+        }
+      }
+    }
     Poll -> {
       case state.config.enabled, state.is_polling {
         True, False -> {
@@ -139,6 +269,22 @@ fn handle_message(
       case state.is_polling && generation == state.poll_generation {
         True -> finish_poll(state, outcome)
         // A late completion from a timed-out worker cannot finish a newer poll
+        False -> actor.continue(state)
+      }
+    }
+
+    PollWorkerDown(generation, down) -> {
+      case state.is_polling && generation == state.poll_generation {
+        True -> {
+          io.println("⚠ Poll worker exited unexpectedly")
+          stop_active_worker(state)
+          finish_poll(
+            state,
+            Error(
+              "subscription poll worker exited: " <> string.inspect(down.reason),
+            ),
+          )
+        }
         False -> actor.continue(state)
       }
     }
@@ -206,6 +352,13 @@ fn handle_message(
     }
 
     SetSelf(subject) -> {
+      case state.self {
+        None -> {
+          let _ = process.send_after(subject, 30_000, CheckDesiredChannels)
+          Nil
+        }
+        Some(_) -> Nil
+      }
       // Receiving the self reference is what starts the schedule
       actor.continue(arm_next_poll(
         SubscriptionState(..state, self: Some(subject)),
@@ -267,21 +420,36 @@ fn finish_poll(
     list.length(poll_result.errors),
   )
 
+  clear_worker_monitor(state.worker_monitor)
   let finished_state =
     SubscriptionState(
       ..state,
       is_polling: False,
       worker: None,
+      worker_monitor: None,
       last_result: Some(poll_result),
       config: SubscriptionConfig(..state.config, last_poll_at: Some(timestamp)),
+      reconcile_pending: case outcome {
+        Ok(_) -> False
+        Error(_) -> state.reconcile_pending
+      },
     )
 
-  actor.continue(arm_next_poll(disarm_watchdog(finished_state)))
+  let finished_state = disarm_watchdog(finished_state)
+  case outcome {
+    Ok(_) -> actor.continue(arm_next_poll(finished_state))
+    Error(_) ->
+      actor.continue(arm_next_poll_after(finished_state, retry_delay_ms()))
+  }
 }
 
 /// Run one engine pull within a deadline that includes channel preparation.
-fn run_pull_worker() -> Result(ytdl_sub.PullSummary, String) {
-  let deadline = monotonic_milliseconds() + pull_timeout_ms()
+fn run_pull_worker(db: Db) -> Result(ytdl_sub.PullSummary, String) {
+  let interval = case subscription_repo.get_config(db) {
+    Ok(config) -> config.poll_interval_minutes
+    Error(_) -> subscription_types.default_config().poll_interval_minutes
+  }
+  let deadline = monotonic_milliseconds() + effective_pull_timeout_ms(interval)
   let layout = ytdl_sub.layout_from_env()
 
   use _ <- result.try(
@@ -289,6 +457,7 @@ fn run_pull_worker() -> Result(ytdl_sub.PullSummary, String) {
     |> result.map_error(fn(err) { "layout: " <> err }),
   )
   takeout.import_and_log(layout)
+  use _ <- result.try(channel_reconciler.reconcile(db, layout))
   use channels <- result.try(
     ytdl_sub.read_channels(layout.channels_file)
     |> result.map_error(fn(err) { "channels: " <> err }),
@@ -301,7 +470,7 @@ fn run_pull_worker() -> Result(ytdl_sub.PullSummary, String) {
         ytdl_sub.write_subscriptions_with_budget(layout, channels, remaining)
         |> result.map_error(fn(err) { "subscriptions: " <> err }),
       )
-      run_poll_phases(layout, deadline)
+      run_poll_phases(layout, deadline, db)
     }
   }
 }
@@ -316,6 +485,7 @@ fn run_pull_worker() -> Result(ytdl_sub.PullSummary, String) {
 fn run_poll_phases(
   layout: ytdl_sub.Layout,
   deadline: Int,
+  db: Db,
 ) -> Result(ytdl_sub.PullSummary, String) {
   use remaining <- result.try(remaining_poll_time(deadline))
   let #(recent_ms, _) = phase_timeouts(remaining, recent_phase_ms())
@@ -328,7 +498,12 @@ fn run_poll_phases(
   let recent =
     label_pass(
       "recent pass",
-      ytdl_sub.run_pull(layout, layout.recent_subscriptions_file, recent_ms),
+      ytdl_sub.run_pull_with_progress(
+        layout,
+        layout.recent_subscriptions_file,
+        recent_ms,
+        fn(_) { update_library_progress(db, layout.library_dir) },
+      ),
     )
   log_pass("recent", recent)
 
@@ -342,13 +517,24 @@ fn run_poll_phases(
       )
       label_pass(
         "backfill pass",
-        ytdl_sub.run_pull(layout, layout.subscriptions_file, backfill_ms),
+        ytdl_sub.run_pull_with_progress(
+          layout,
+          layout.subscriptions_file,
+          backfill_ms,
+          fn(_) { update_library_progress(db, layout.library_dir) },
+        ),
       )
     }
   }
   log_pass("backfill", backfill)
 
   ytdl_sub.merge_summaries(recent, backfill)
+}
+
+fn update_library_progress(db: Db, library_dir: String) -> Nil {
+  let _ = reconcile_library(db, library_dir, get_timestamp())
+  plex.enrich_titles(library_dir)
+  plex.refresh_library()
 }
 
 /// Name the pass in its errors, so a poll row says which one failed
@@ -445,7 +631,7 @@ fn record_downloads(
   })
 }
 
-/// Record library files that have no seen-video row yet
+/// Record library files and refresh metadata for existing records.
 ///
 /// A poll that exits non-zero or times out leaves downloaded files in the
 /// library without the engine's "Files created" report, and the per-channel
@@ -461,8 +647,34 @@ pub fn reconcile_library(
   |> list.fold(#(0, 0), fn(acc, path) {
     let #(recorded, failed) = acc
     let video = ytdl_sub.to_discovered_video(library_dir, path)
-    case subscription_repo.is_seen(db, video.video_id) {
-      Ok(True) -> acc
+    case subscription_repo.get_seen_video(db, video.video_id) {
+      Ok(Some(existing)) -> {
+        // Preserve arrival order and job history when fuller sidecar metadata
+        // becomes available after an interrupted or earlier download.
+        case
+          existing.title == video.title
+          && existing.url == video.url
+          && existing.duration_seconds == video.duration_seconds
+          && existing.thumbnail_url == video.thumbnail_url
+          && existing.published_at == video.published_at
+        {
+          True -> acc
+          False ->
+            case
+              subscription_repo.mark_seen(
+                db,
+                video,
+                True,
+                existing.skip_reason,
+                existing.job_id,
+                existing.first_seen_at,
+              )
+            {
+              Ok(_) -> acc
+              Error(_) -> #(recorded, failed + 1)
+            }
+        }
+      }
       _ ->
         case
           subscription_repo.mark_seen(db, video, True, None, None, timestamp)
@@ -504,6 +716,13 @@ fn pull_timeout_ms() -> Int {
   minutes * 60_000
 }
 
+fn effective_pull_timeout_ms(interval_minutes: Int) -> Int {
+  int.min(
+    pull_timeout_ms(),
+    int.max(safe_minutes(interval_minutes) * 60_000 - 120_000, 1000),
+  )
+}
+
 /// Start one engine poll in its own process, with a watchdog
 fn start_poll(
   state: SubscriptionState,
@@ -519,18 +738,37 @@ fn start_poll(
           let outcome = state.run_poll()
           process.send(self, PollFinished(generation, outcome))
         })
+      let worker_monitor = process.monitor(worker)
+      case state.poll_guard_name {
+        Some(name) -> guard_poll_worker(name, process.self(), worker)
+        None -> Nil
+      }
       // Two engine passes share the poll budget, so the watchdog leaves room
       // for both deadlines plus the startup and teardown of each process
+      let watchdog_delay =
+        int.min(
+          state.watchdog_ms,
+          safe_minutes(state.config.poll_interval_minutes) * 60_000,
+        )
       let watchdog =
-        process.send_after(self, state.watchdog_ms, PollWatchdog(generation))
+        process.send_after(self, watchdog_delay, PollWatchdog(generation))
       actor.continue(
         SubscriptionState(
           ..state,
           is_polling: True,
+          poll_started_at: Some(get_timestamp()),
           watchdog: Some(watchdog),
           poll_generation: generation,
           worker: Some(worker),
+          worker_monitor: Some(worker_monitor),
         ),
+      )
+      |> actor.with_selector(
+        process.new_selector()
+        |> process.select(self)
+        |> process.select_specific_monitor(worker_monitor, fn(down) {
+          PollWorkerDown(generation, down)
+        }),
       )
     }
     None -> actor.continue(state)
@@ -567,22 +805,57 @@ fn disarm_watchdog(state: SubscriptionState) -> SubscriptionState {
 fn arm_next_poll(state: SubscriptionState) -> SubscriptionState {
   let state = disarm_timer(state)
   let minutes = safe_minutes(state.config.poll_interval_minutes)
+  let now = get_timestamp()
+  let started_at = option.unwrap(state.poll_started_at, now)
+  let delay = next_poll_delay(started_at, now, minutes)
+  arm_next_poll_after_disarmed(state, delay * 1000)
+}
+
+fn arm_next_poll_after(
+  state: SubscriptionState,
+  delay_ms: Int,
+) -> SubscriptionState {
+  let state = disarm_timer(state)
+  arm_next_poll_after_disarmed(state, int.max(delay_ms, 1))
+}
+
+fn arm_next_poll_after_disarmed(
+  state: SubscriptionState,
+  delay_ms: Int,
+) -> SubscriptionState {
+  let now = get_timestamp()
   case state.config.enabled, state.is_polling, state.self {
     True, False, Some(self) -> {
       let timer =
         process.send_after(
           self,
-          minutes * 60_000,
+          delay_ms,
           ScheduledPoll(state.schedule_generation),
         )
       SubscriptionState(
         ..state,
         timer: Some(timer),
-        next_poll_at: Some(get_timestamp() + minutes * 60),
+        next_poll_at: Some(now + delay_ms / 1000),
       )
     }
     _, _, _ -> state
   }
+}
+
+/// Return seconds until the next poll, anchored to the previous poll start.
+/// A backwards wall-clock adjustment is treated as zero elapsed time.
+pub fn next_poll_delay(
+  started_at: Int,
+  now: Int,
+  interval_minutes: Int,
+) -> Int {
+  let interval_seconds = safe_minutes(interval_minutes) * 60
+  let elapsed = int.max(now - started_at, 0)
+  int.max(interval_seconds - elapsed, 1)
+}
+
+fn retry_delay_ms() -> Int {
+  5 * 60 * 1000
 }
 
 /// Stop downloads before making the poll slot available to another worker.
@@ -591,10 +864,28 @@ fn stop_active_worker(state: SubscriptionState) -> Nil {
     Some(worker) -> stop_worker(worker)
     None -> Nil
   }
+  clear_worker_monitor(state.worker_monitor)
+}
+
+fn clear_worker_monitor(monitor: Option(Monitor)) -> Nil {
+  case monitor {
+    Some(value) -> process.demonitor_process(value)
+    None -> Nil
+  }
 }
 
 @external(erlang, "subscription_manager_ffi", "stop_worker")
 fn stop_worker(worker: Pid) -> Nil
+
+@external(erlang, "subscription_manager_ffi", "await_previous_poll_cleanup")
+fn await_previous_poll_cleanup(name: Name(SubscriptionMessage)) -> Bool
+
+@external(erlang, "subscription_manager_ffi", "guard_poll_worker")
+fn guard_poll_worker(
+  name: Name(SubscriptionMessage),
+  manager: Pid,
+  worker: Pid,
+) -> Nil
 
 fn remaining_poll_time(deadline: Int) -> Result(Int, String) {
   let remaining = deadline - monotonic_milliseconds()

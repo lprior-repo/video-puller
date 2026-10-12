@@ -178,6 +178,60 @@ pub fn mark_seen(
   db.exec_raw(conn, sql)
 }
 
+/// Remove feed entries for channels outside the authoritative desired list.
+pub fn remove_inactive_channels(
+  conn: Db,
+  channel_names: List(String),
+) -> Result(Nil, DbError) {
+  case channel_names {
+    [] -> Error(db.QueryError("refusing to remove every channel"))
+    _ ->
+      db.exec_raw(
+        conn,
+        "DELETE FROM seen_videos WHERE channel_name IS NOT NULL AND channel_name NOT IN ("
+          <> string.join(list.map(channel_names, escape_string), ", ")
+          <> ")",
+      )
+  }
+}
+
+/// Remove expired feed records even after a restart between file deletion and
+/// database cleanup. Explicit one-off subscriptions are excluded by labels.
+pub fn remove_expired_videos(
+  conn: Db,
+  channel_names: List(String),
+  cutoff: Int,
+) -> Result(Nil, DbError) {
+  case channel_names {
+    [] -> Ok(Nil)
+    _ ->
+      db.exec_raw(
+        conn,
+        "DELETE FROM seen_videos WHERE published_at < "
+          <> int.to_string(cutoff)
+          <> " AND channel_name IN ("
+          <> string.join(list.map(channel_names, escape_string), ", ")
+          <> ")",
+      )
+  }
+}
+
+/// Converge the feed after file cleanup, including a restart between unlink
+/// and the database update. Download archives remain the completion history.
+pub fn remove_missing_downloads(
+  conn: Db,
+  live_ids: List(String),
+) -> Result(Nil, DbError) {
+  let condition = case live_ids {
+    [] -> ""
+    _ ->
+      " AND video_id NOT IN ("
+      <> string.join(list.map(live_ids, escape_string), ", ")
+      <> ")"
+  }
+  db.exec_raw(conn, "DELETE FROM seen_videos WHERE downloaded = 1" <> condition)
+}
+
 /// Update seen video to mark as downloaded
 pub fn mark_downloaded(
   conn: Db,
@@ -215,6 +269,27 @@ pub fn list_seen_videos(
     |> select.offset(offset_count)
     |> select.to_query()
 
+  db.run_read(conn, query, seen_video_decoder())
+}
+
+/// The YouTube-style feed shows completed media in publication order.
+pub fn list_downloaded_videos(
+  conn: Db,
+  limit_count: Int,
+) -> Result(List(SeenVideo), DbError) {
+  let query =
+    select.new()
+    |> select.from_table("seen_videos")
+    |> select.select_cols([
+      "video_id", "channel_id", "channel_name", "title", "url", "published_at",
+      "duration_seconds", "thumbnail_url", "first_seen_at", "downloaded",
+      "skipped", "skip_reason", "job_id",
+    ])
+    |> select.where(where.eq(where.col("downloaded"), where.int(1)))
+    |> select.order_by_desc("published_at")
+    |> select.order_by_desc("first_seen_at")
+    |> select.limit(limit_count)
+    |> select.to_query()
   db.run_read(conn, query, seen_video_decoder())
 }
 

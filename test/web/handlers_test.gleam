@@ -1,17 +1,25 @@
 import domain/core_types
+import domain/subscription_types.{DiscoveredVideo, SubscriptionStatus}
+import engine/subscription_progress.{Snapshot}
+import engine/ytdl_sub
+import envoy
+import gleam/erlang/process
 import gleam/http
 import gleam/http/response
 import gleam/list
-import gleam/option.{None}
+import gleam/option.{None, Some}
 import gleam/string
 import gleeunit
 import gleeunit/should
 import infra/db
 import infra/migrator
 import infra/repo
+import infra/subscription_repo
+import lustre/element.{to_document_string}
 import simplifile
 import web/handlers
 import web/middleware
+import web/templates
 import wisp/simulate
 
 pub fn main() {
@@ -95,9 +103,39 @@ pub fn get_parent_directory_trailing_slash_test() {
   |> should.equal("/home/user/videos")
 }
 
+/// The settings page reflects the manager's configured output and installed yt-dlp.
+pub fn settings_uses_effective_output_and_yt_dlp_version_test() {
+  let #(conn, ctx) = setup_test_db("settings_effective_output")
+  let response = handlers.settings(simulate.request(http.Get, "/settings"), ctx)
+  let body = simulate.read_body(response)
+
+  response.status |> should.equal(200)
+  body |> string.contains(ctx.output_directory) |> should.be_true()
+  body |> string.contains("yt-dlp Version") |> should.be_true()
+  body |> string.contains("2024.11.18") |> should.be_false()
+
+  cleanup_test_db(conn, "settings_effective_output")
+}
+
 pub fn get_parent_directory_multiple_extensions_test() {
   handlers.get_parent_directory("/home/user/videos/archive.tar.gz")
   |> should.equal("/home/user/videos")
+}
+
+pub fn plex_library_url_uses_native_media_route_when_machine_id_present_test() {
+  handlers.plex_library_url_for(
+    "http://127.0.0.1:32400/",
+    Some("machine123"),
+    Some("4"),
+  )
+  |> should.equal(Some(
+    "http://127.0.0.1:32400/web/index.html#!/media/machine123/com.plexapp.plugins.library?source=4",
+  ))
+}
+
+pub fn plex_library_url_falls_back_to_web_without_machine_id_test() {
+  handlers.plex_library_url_for("http://127.0.0.1:32400", None, Some("4"))
+  |> should.equal(Some("http://127.0.0.1:32400/web"))
 }
 
 // =============================================================================
@@ -297,6 +335,46 @@ pub fn create_job_trims_whitespace_test() {
   cleanup_test_db(conn, "create_job_trim")
 }
 
+pub fn youtube_requests_use_one_idempotent_subscription_coordinator_test() {
+  let root = "/tmp/test_handlers_youtube_coordinator"
+  let _ = simplifile.delete_all([root])
+  let _ = simplifile.create_directory_all(root <> "/ytdl-sub")
+  let channels_file = root <> "/ytdl-sub/channels.txt"
+  let _ = simplifile.write(channels_file, "https://www.youtube.com/@Fireship\n")
+  let previous = envoy.get("DATA_DIR")
+  envoy.set("DATA_DIR", root)
+  let #(conn, ctx) = setup_test_db("youtube_coordinator")
+  let manager = process.new_subject()
+  let ctx = middleware.Context(..ctx, subscription_manager: Some(manager))
+  let request =
+    simulate.request(http.Post, "/jobs")
+    |> simulate.form_body([
+      #("url", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+    ])
+  handlers.create_job(request, ctx)
+  |> response.get_header("location")
+  |> should.equal(Ok("/subscriptions"))
+  process.receive(manager, 100) |> should.be_ok()
+  let before =
+    simplifile.read(root <> "/ytdl-sub/desired-channels.txt") |> should.be_ok()
+  handlers.create_job(request, ctx).status |> should.equal(303)
+  simplifile.read(root <> "/ytdl-sub/desired-channels.txt")
+  |> should.equal(Ok(before))
+  process.receive(manager, 10) |> should.be_error()
+  repo.list_jobs(conn, None) |> should.equal(Ok([]))
+  ytdl_sub.read_channels(root <> "/ytdl-sub/desired-channels.txt")
+  |> should.be_ok()
+  |> list.length
+  |> should.equal(2)
+  case previous {
+    Ok(value) -> envoy.set("DATA_DIR", value)
+    Error(_) -> envoy.unset("DATA_DIR")
+  }
+  let _ = cleanup_test_db(conn, "youtube_coordinator")
+  let _ = simplifile.delete_all([root])
+  Nil
+}
+
 // =============================================================================
 // Handler Tests: dashboard
 // =============================================================================
@@ -428,8 +506,123 @@ pub fn subscriptions_renders_config_form_test() {
   body |> string.contains("poll_interval") |> should.be_true()
   body |> string.contains("ytdl-sub") |> should.be_true()
   body |> string.contains("Subscriptions") |> should.be_true()
+  body |> string.contains("href=\"/subscriptions\"") |> should.be_true()
+  body |> string.contains("class=\"nav-item active\"") |> should.be_true()
+  body |> string.contains("name=\"days\"") |> should.be_true()
+  body |> string.contains("name=\"workers\"") |> should.be_true()
+  body |> string.contains("id=\"subscription-live\"") |> should.be_true()
+  body |> string.contains("setInterval(refresh, 4000)") |> should.be_true()
+  body
+  |> string.contains("action=\"/subscriptions/channels\"")
+  |> should.be_true()
+  body |> string.contains("name=\"channel_text\"") |> should.be_true()
+  body
+  |> string.contains("action=\"/subscriptions/channels/add\"")
+  |> should.be_true()
+  body |> string.contains("name=\"channel_url\"") |> should.be_true()
 
   cleanup_test_db(conn, "subscriptions_get")
+}
+
+/// A committed subscription appears promptly with its original video title.
+pub fn subscriptions_feed_uses_video_title_test() {
+  let #(conn, ctx) = setup_test_db("subscriptions_feed_title")
+  let media_path = "/tmp/test_subscription_feed_meta.mp4"
+  let sidecar_path = media_path <> ".info.json"
+  let _ =
+    simplifile.write(
+      sidecar_path,
+      "{\"title\":\"The actual video title\",\"channel\":\"Sample Channel\",\"duration\":83,\"thumbnail\":\"https://example.com/thumb.jpg\",\"webpage_url\":\"https://www.youtube.com/watch?v=dQw4w9WgXcQ\",\"id\":\"dQw4w9WgXcQ\"}",
+    )
+  let video =
+    DiscoveredVideo(
+      video_id: "dQw4w9WgXcQ",
+      channel_id: None,
+      channel_name: Some("Sample Channel"),
+      title: "episode filename title",
+      url: "file://" <> media_path,
+      published_at: None,
+      duration_seconds: None,
+      thumbnail_url: None,
+    )
+  let _ = subscription_repo.mark_seen(conn, video, True, None, None, 1000)
+
+  let response =
+    handlers.subscriptions(simulate.request(http.Get, "/subscriptions"), ctx)
+  let body = simulate.read_body(response)
+
+  response.status |> should.equal(200)
+  body |> string.contains("The actual video title") |> should.be_true()
+  body |> string.contains("Sample Channel") |> should.be_true()
+  body
+  |> string.contains("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+  |> should.be_true()
+  body |> string.contains("1:23") |> should.be_true()
+  body |> string.contains("https://example.com/thumb.jpg") |> should.be_true()
+  body
+  |> string.contains("file:///tmp/test_subscription_feed_meta.mp4")
+  |> should.be_false()
+
+  let _ = simplifile.delete(sidecar_path)
+  cleanup_test_db(conn, "subscriptions_feed_title")
+}
+
+pub fn subscriptions_progress_shows_phase_totals_and_active_downloads_test() {
+  let progress = [
+    Snapshot(
+      key: "recent-alpha",
+      channel: "Alpha Channel",
+      phase: "recent",
+      status: "completed",
+      message: "Video saved",
+      percent: Some(100),
+      started_at: 100,
+      updated_at: 110,
+      phase_total: 2,
+    ),
+    Snapshot(
+      key: "recent-beta",
+      channel: "Beta Channel",
+      phase: "recent",
+      status: "running",
+      message: "Downloading latest upload",
+      percent: Some(42),
+      started_at: 105,
+      updated_at: 111,
+      phase_total: 2,
+    ),
+    Snapshot(
+      key: "backfill-alpha",
+      channel: "Alpha Channel",
+      phase: "backfill",
+      status: "running",
+      message: "Downloading archive upload",
+      percent: None,
+      started_at: 112,
+      updated_at: 112,
+      phase_total: 3,
+    ),
+  ]
+  let status =
+    SubscriptionStatus(
+      enabled: True,
+      last_poll_at: None,
+      next_poll_at: None,
+      last_result: None,
+      is_polling: True,
+    )
+  let html =
+    templates.subscription_live_fragment(status, [], progress, 63)
+    |> to_document_string
+
+  html |> string.contains("1 / 2 finished") |> should.be_true()
+  html |> string.contains("0 / 3 finished") |> should.be_true()
+  html |> string.contains("Beta Channel") |> should.be_true()
+  html |> string.contains("Downloading latest upload · 42%") |> should.be_true()
+  html |> string.contains("Alpha Channel") |> should.be_true()
+  html
+  |> string.contains("63 completed videos in your library")
+  |> should.be_true()
 }
 
 /// Test: subscriptions page shows default config when none exists
@@ -475,6 +668,18 @@ pub fn health_endpoint_success_test() {
   body |> string.contains("\"connected\"") |> should.be_true()
 
   cleanup_test_db(conn, "health_success")
+}
+
+pub fn health_detects_unresponsive_scheduler_with_connected_database_test() {
+  let #(conn, ctx) = setup_test_db("health_hung_scheduler")
+  let hung = process.new_subject()
+  let ctx = middleware.Context(..ctx, subscription_manager: Some(hung))
+  let response = handlers.health(simulate.request(http.Get, "/health"), ctx)
+  response.status |> should.equal(503)
+  let body = simulate.read_body(response)
+  body |> string.contains("\"database\":\"connected\"") |> should.be_true()
+  body |> string.contains("\"scheduler\":\"unresponsive\"") |> should.be_true()
+  cleanup_test_db(conn, "health_hung_scheduler")
 }
 // Note: Testing disconnected database is not feasible with SQLite in-process
 // because using a closed connection causes a BEAM-level badarg that isn't

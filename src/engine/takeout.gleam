@@ -5,6 +5,7 @@
 /// list can be populated without any account access or browser cookies. Drop
 /// the CSV at `<DATA_DIR>/ytdl-sub/subscriptions.csv`; once merged it is
 /// renamed to `subscriptions.csv.imported`.
+import engine/channel_import
 import engine/ytdl_sub
 import gleam/int
 import gleam/io
@@ -63,6 +64,13 @@ fn import_export(
       )
     channels -> Ok(channels)
   })
+  use _ <- result.try(
+    channel_import.add_desired_channels(channels, layout.channels_file)
+    |> result.map(fn(_) { Nil })
+    |> result.map_error(fn(err) {
+      "cannot update desired channel list: " <> err
+    }),
+  )
   use existing <- result.try(read_file(layout.channels_file))
 
   let #(updated, added) = merge_channels(existing, channels)

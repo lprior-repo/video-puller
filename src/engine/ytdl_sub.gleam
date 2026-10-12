@@ -4,12 +4,16 @@
 /// public channel URLs without browser cookies, sequentially, on the
 /// application's own polling schedule.
 import domain/subscription_types.{type DiscoveredVideo, DiscoveredVideo}
+import engine/download_history
+import engine/media_info
 import engine/shell
+import engine/subscription_metadata
+import engine/subscription_pool
+import engine/subscription_progress
+import engine/subscription_settings
 import envoy
 import gleam/dict.{type Dict}
-import gleam/dynamic/decode
 import gleam/int
-import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -37,6 +41,8 @@ pub type Layout {
     takeout_file: String,
     library_dir: String,
     work_dir: String,
+    workers: Int,
+    download_days: Int,
   )
 }
 
@@ -64,6 +70,7 @@ pub fn layout_from_env() -> Layout {
 /// lines, so a relative `DATA_DIR` must not leak into the generated config.
 pub fn layout(root: String) -> Layout {
   let root = absolute_path(root)
+  let settings = subscription_settings.load()
   let ytdl_sub_dir = root <> "/ytdl-sub"
   Layout(
     root: root,
@@ -75,6 +82,8 @@ pub fn layout(root: String) -> Layout {
     takeout_file: ytdl_sub_dir <> "/subscriptions.csv",
     library_dir: root <> "/library",
     work_dir: ytdl_sub_dir <> "/working",
+    workers: settings.workers,
+    download_days: settings.days,
   )
 }
 
@@ -100,9 +109,52 @@ pub fn ensure_layout(layout: Layout) -> Result(Nil, String) {
   use _ <- result.try(create_directory(layout.root))
   use _ <- result.try(create_directory(layout.work_dir))
   use _ <- result.try(create_directory(layout.library_dir))
+  ensure_plexignore(layout.root)
   use _ <- result.try(ensure_config_file(layout))
   use _ <- result.try(ensure_channels_file(layout))
   Ok(Nil)
+}
+
+/// Keep ytdl-sub scratch files out of Plex scans while leaving library/*
+/// visible to the library section.
+fn ensure_plexignore(data_root: String) -> Nil {
+  let path = data_root <> "/.plexignore"
+  let rules = ["ytdl-sub/*", "tmp/*", "cache/*", "retired-library/*", "run/*"]
+  case simplifile.read(path) {
+    Ok(existing) -> {
+      let updated =
+        list.fold(rules, existing, fn(content, rule) {
+          case string.contains(content, rule) {
+            True -> content
+            False ->
+              content
+              <> case
+                string.is_empty(content) || string.ends_with(content, "\n")
+              {
+                True -> ""
+                False -> "\n"
+              }
+              <> rule
+              <> "\n"
+          }
+        })
+      case updated == existing {
+        True -> Nil
+        False -> {
+          let _ = simplifile.write(path, updated)
+          Nil
+        }
+      }
+    }
+    Error(_) ->
+      case simplifile.is_file(path) {
+        Ok(False) -> {
+          let _ = simplifile.write(path, string.join(rules, "\n") <> "\n")
+          Nil
+        }
+        _ -> Nil
+      }
+  }
 }
 
 fn create_directory(path: String) -> Result(Nil, String) {
@@ -124,6 +176,12 @@ fn write_config_file(layout: Layout) -> Result(Nil, String) {
     "configuration:\n"
     <> "  working_directory: \""
     <> escape_yaml(layout.work_dir)
+    <> "\"\n"
+    <> "  ffmpeg_path: \""
+    <> escape_yaml(executable_path("ffmpeg"))
+    <> "\"\n"
+    <> "  ffprobe_path: \""
+    <> escape_yaml(executable_path("ffprobe"))
     <> "\"\n"
   simplifile.write(layout.config_file, content)
   |> result.map_error(fn(err) {
@@ -188,6 +246,17 @@ pub fn parse_channel_line(line: String) -> Option(Channel) {
 /// them into a different URL.
 pub fn canonical_channel_url(url: String) -> String {
   let #(without_fragment, _) = split_once(url, "#")
+  let no_trailing_slash = case string.ends_with(without_fragment, "/") {
+    True -> string.drop_end(without_fragment, 1)
+    False -> without_fragment
+  }
+  case youtube_video_id(no_trailing_slash) {
+    Some(id) -> "https://www.youtube.com/watch?v=" <> id
+    None -> canonical_non_video_url(without_fragment)
+  }
+}
+
+fn canonical_non_video_url(without_fragment: String) -> String {
   let #(base, query) = split_once(without_fragment, "?")
   let trimmed = case string.ends_with(string.trim(base), "/") {
     True -> string.drop_end(string.trim(base), 1)
@@ -201,6 +270,52 @@ pub fn canonical_channel_url(url: String) -> String {
         False -> canonical
       }
     None -> canonical
+  }
+}
+
+/// Return the stable YouTube ID from watch, short, live, embed, or youtu.be URLs.
+pub fn youtube_video_id(url: String) -> Option(String) {
+  let #(without_fragment, _) = split_once(url, "#")
+  let #(base, query) = split_once(without_fragment, "?")
+  let parts = string.split(base, "/")
+  case parts {
+    [_, "", "youtu.be", id] -> nonempty_id(id)
+    [_, "", host, "watch"] ->
+      case is_youtube_host(host) {
+        True -> query_video_id(query)
+        False -> None
+      }
+    [_, "", host, kind, id] ->
+      case
+        is_youtube_host(host)
+        && list.contains(["shorts", "live", "embed"], kind)
+      {
+        True -> nonempty_id(id)
+        False -> None
+      }
+    _ -> None
+  }
+}
+
+fn nonempty_id(id: String) -> Option(String) {
+  case string.is_empty(id) {
+    True -> None
+    False -> Some(id)
+  }
+}
+
+fn query_video_id(query: Option(String)) -> Option(String) {
+  case query {
+    Some(value) ->
+      case
+        list.find(string.split(value, "&"), fn(part) {
+          string.starts_with(part, "v=")
+        })
+      {
+        Ok(part) -> nonempty_id(string.drop_start(part, 2))
+        Error(_) -> None
+      }
+    None -> None
   }
 }
 
@@ -342,6 +457,43 @@ pub fn dedupe_channels(
   |> unique_labels
 }
 
+/// Return the exact filesystem show names ytdl-sub will manage for these
+/// subscriptions, using the ID cache for duplicate channel identities.
+pub fn managed_labels(
+  channels: List(Channel),
+  cache_file: String,
+  library_dir: String,
+) -> List(String) {
+  managed_channels(channels, cache_file, library_dir)
+  |> list.map(fn(channel) {
+    option.unwrap(channel.label, subscription_label(channel.url))
+  })
+}
+
+/// Resolve cached identities, deduplicate the full desired set, and return
+/// channels labeled with the exact sanitized names used as show directories.
+pub fn managed_channels(
+  channels: List(Channel),
+  cache_file: String,
+  library_dir: String,
+) -> List(Channel) {
+  let channels =
+    list.map(channels, fn(channel) {
+      Channel(channel.label, canonical_channel_url(channel.url))
+    })
+  let cache = load_cache(cache_file)
+  let channels =
+    list.map(channels, fn(channel) {
+      apply_cache_title(channel, cache_row(cache, channel.url))
+    })
+  let ids = channel_ids(channels, cache)
+  let channels = dedupe_channels(channels, ids, library_dir)
+  list.map(channels, fn(channel) {
+    let label = option.unwrap(channel.label, subscription_label(channel.url))
+    Channel(Some(sanitize_show_directory(label)), channel.url)
+  })
+}
+
 /// Newest uploads the recent pass inspects per channel, unless overridden
 pub const default_recent_videos = 5
 
@@ -417,6 +569,13 @@ fn write_subscription_files(
   let ids = channel_ids(resolved, load_cache(layout.channel_ids_file))
   let channels = dedupe_channels(resolved, ids, layout.library_dir)
   let channels = rotate_channels(channels, offset)
+  // Explicit requests should start immediately rather than wait behind the
+  // channel backlog. Label assignment still happens before reordering.
+  let channels =
+    list.append(
+      list.filter(channels, fn(channel) { is_explicit_video_url(channel.url) }),
+      list.filter(channels, fn(channel) { !is_explicit_video_url(channel.url) }),
+    )
   let recent_videos = case recent_videos > 0 {
     True -> recent_videos
     False -> default_recent_videos
@@ -431,10 +590,126 @@ fn write_subscription_files(
       #("playlist_end", int.to_string(recent_videos)),
     ]),
   )
+  use _ <- result.try(write_parallel_files(layout, channels, recent_videos))
   // Advance before execution so a killed or timed-out poll still gives the
   // next channel first chance after restart. Archive names stay unchanged.
   simplifile.write(cursor_path, int.to_string(offset + 1) <> "\n")
   |> result.map_error(fn(err) { "cannot save poll cursor: " <> file_error(err) })
+}
+
+/// Prepare independent working directories while preserving shared channel archives.
+fn write_parallel_files(
+  layout: Layout,
+  channels: List(Channel),
+  recent_videos: Int,
+) -> Result(Nil, String) {
+  let cache = load_cache(layout.channel_ids_file)
+  let ids = channel_ids(channels, cache)
+  use manifests <- result.try(
+    list.try_map(channels, fn(channel) {
+      let key = channel_key(channel.url)
+      let directory = layout.root <> "/ytdl-sub/parallel/" <> key
+      use _ <- result.try(create_directory(directory))
+      let snapshot =
+        layout.root <> "/ytdl-sub/archive-snapshots/" <> key <> ".txt"
+      let serial = serialize_before_parallel(channel, ids)
+      let child =
+        Layout(
+          ..layout,
+          config_file: directory <> "/config.yaml",
+          work_dir: directory <> "/working",
+          download_days: case is_explicit_video_url(channel.url) {
+            True -> 0
+            False -> layout.download_days
+          },
+        )
+      use _ <- result.try(write_config_file(child))
+      let full = directory <> "/subscriptions.yaml"
+      let recent = directory <> "/subscriptions-recent.yaml"
+      let archive_option = [
+        #("download_archive", "\"" <> escape_yaml(snapshot) <> "\""),
+      ]
+      use _ <- result.try(write_subscription_file(
+        full,
+        child,
+        [channel],
+        list.append(archive_option, [#("break_on_existing", "False")]),
+      ))
+      use _ <- result.try(write_subscription_file(
+        recent,
+        child,
+        [channel],
+        list.append(archive_option, [
+          #("playlist_end", int.to_string(recent_videos)),
+        ]),
+      ))
+      Ok(#(
+        job_manifest_line(child.config_file, full, snapshot, serial),
+        job_manifest_line(child.config_file, recent, snapshot, serial),
+      ))
+    }),
+  )
+  use _ <- result.try(
+    simplifile.write(
+      layout.subscriptions_file <> ".jobs",
+      string.join(list.map(manifests, fn(row) { row.0 }), "\n"),
+    )
+    |> result.map_error(fn(_) { "Cannot write full-pass channel jobs" }),
+  )
+  simplifile.write(
+    layout.recent_subscriptions_file <> ".jobs",
+    string.join(list.map(manifests, fn(row) { row.1 }), "\n"),
+  )
+  |> result.map_error(fn(_) { "Cannot write recent-pass channel jobs" })
+}
+
+fn job_manifest_line(
+  config: String,
+  subscriptions: String,
+  snapshot: String,
+  serial: Bool,
+) -> String {
+  config
+  <> "\t"
+  <> subscriptions
+  <> "\t"
+  <> case serial {
+    True -> "serial"
+    False -> "parallel"
+  }
+  <> "\t"
+  <> snapshot
+}
+
+fn serialize_before_parallel(
+  channel: Channel,
+  ids: Dict(String, String),
+) -> Bool {
+  is_explicit_video_url(channel.url)
+  || is_playlist_url(channel.url)
+  || {
+    is_channel_url(channel.url)
+    && dict.get(ids, canonical_channel_url(channel.url)) == Error(Nil)
+  }
+}
+
+fn is_playlist_url(url: String) -> Bool {
+  let #(base, _) = split_once(canonical_channel_url(url), "?")
+  string.ends_with(base, "/playlist")
+}
+
+type HashAlgorithm {
+  Sha256
+}
+
+@external(erlang, "crypto", "hash")
+fn hash(algorithm: HashAlgorithm, data: String) -> BitArray
+
+@external(erlang, "binary", "encode_hex")
+fn encode_hex(data: BitArray) -> String
+
+fn channel_key(url: String) -> String {
+  hash(Sha256, url) |> encode_hex
 }
 
 /// Newest-uploads window for the recent pass (`RECENT_VIDEOS`)
@@ -475,6 +750,11 @@ fn subscriptions_content(
   // false-positives on genuinely low-res uploads and skips them forever;
   // throttle protection's request pacing stays enabled.
   <> "    enable_resolution_assert: False\n"
+  <> subscription_metadata.overrides_block()
+  <> subscription_metadata.preset_block(layout.download_days)
+  <> subscription_metadata.restricted_filter_block(
+    subscription_settings.load().skip_restricted,
+  )
   <> ytdl_options_block(ytdl_options)
   <> "\n"
   <> "Plex TV Show by Date:\n"
@@ -845,20 +1125,292 @@ pub fn run_pull(
   subscriptions_file: String,
   timeout_ms: Int,
 ) -> Result(PullSummary, String) {
+  run_pull_with_progress(layout, subscriptions_file, timeout_ms, fn(_) { Nil })
+}
+
+/// Record each finished channel before the complete pass returns.
+pub fn run_pull_with_progress(
+  layout: Layout,
+  subscriptions_file: String,
+  timeout_ms: Int,
+  finished: fn(Result(PullSummary, String)) -> Nil,
+) -> Result(PullSummary, String) {
+  let phase = phase_name(subscriptions_file)
+  let workers = layout.workers
+  case simplifile.read(subscriptions_file <> ".jobs") {
+    Ok(manifest) -> {
+      case parse_job_manifest(manifest) {
+        Error(message) -> {
+          subscription_progress.prepare_phase(layout.root, phase, [], 0)
+          let outcome = Error(message)
+          finished(outcome)
+          outcome
+        }
+        Ok(jobs) -> {
+          subscription_progress.prepare_phase(
+            layout.root,
+            phase,
+            list.map(jobs, fn(job) {
+              #(worker_key(job.0), channel_label(job.1))
+            }),
+            list.length(jobs),
+          )
+          let serial_jobs = list.filter(jobs, fn(job) { job.2 })
+          let parallel_jobs = list.filter(jobs, fn(job) { !job.2 })
+          let outcomes =
+            subscription_pool.run_ordered(
+              serial_jobs,
+              parallel_jobs,
+              workers,
+              timeout_ms,
+              fn(job, budget) {
+                run_single(
+                  layout.root,
+                  phase,
+                  worker_key(job.0),
+                  channel_label(job.1),
+                  list.length(jobs),
+                  job.0,
+                  job.1,
+                  job.3,
+                  budget,
+                )
+              },
+              finished,
+            )
+          subscription_progress.close_phase(
+            layout.root,
+            phase,
+            "Worker stopped before completion (subscription deadline or worker exit)",
+          )
+          case outcomes {
+            [] -> Error("No parallel subscription jobs prepared")
+            [first, ..rest] -> list.fold(rest, first, merge_summaries)
+          }
+        }
+      }
+    }
+    Error(_) -> {
+      let error =
+        "subscription job manifest missing; refusing untracked download"
+      subscription_progress.prepare_phase(layout.root, phase, [], 0)
+      let outcome = Error(error)
+      finished(outcome)
+      outcome
+    }
+  }
+}
+
+/// Parse only the current four-column manifest format. Older manifests do not
+/// carry a private archive snapshot and therefore cannot safely start a job.
+fn parse_job_manifest(
+  manifest: String,
+) -> Result(List(#(String, String, Bool, String)), String) {
+  let lines =
+    manifest
+    |> string.split("\n")
+    |> trim_manifest_tail
+  case lines {
+    [] ->
+      Error("subscription job manifest is empty; refusing untracked download")
+    _ ->
+      list.try_map(lines, fn(line) {
+        let line = string.trim(line)
+        case string.is_empty(line) {
+          True ->
+            Error(
+              "invalid subscription job manifest; refusing untracked download",
+            )
+          False -> parse_job_manifest_line(line)
+        }
+      })
+  }
+}
+
+fn trim_manifest_tail(lines: List(String)) -> List(String) {
+  case lines {
+    [] -> []
+    [line] ->
+      case string.is_empty(string.trim(line)) {
+        True -> []
+        False -> [line]
+      }
+    [line, ..rest] -> [line, ..trim_manifest_tail(rest)]
+  }
+}
+
+fn parse_job_manifest_line(
+  line: String,
+) -> Result(#(String, String, Bool, String), String) {
+  case string.split(line, "\t") {
+    [config, subscriptions, mode, snapshot] ->
+      case
+        string.is_empty(config)
+        || string.is_empty(subscriptions)
+        || string.is_empty(snapshot)
+      {
+        True ->
+          Error(
+            "invalid subscription job manifest; refusing untracked download",
+          )
+        False ->
+          case mode {
+            "serial" -> Ok(#(config, subscriptions, True, snapshot))
+            "parallel" -> Ok(#(config, subscriptions, False, snapshot))
+            _ ->
+              Error(
+                "invalid subscription job manifest; refusing untracked download",
+              )
+          }
+      }
+    _ -> Error("invalid subscription job manifest; refusing untracked download")
+  }
+}
+
+fn executable_path(command: String) -> String {
+  case shell.run("which", [command]) {
+    Ok(result) if result.exit_code == 0 -> string.trim(result.stdout)
+    _ -> "/usr/bin/" <> command
+  }
+}
+
+fn run_single(
+  data_root: String,
+  phase: String,
+  worker_key: String,
+  channel: String,
+  phase_total: Int,
+  config_file: String,
+  subscriptions_file: String,
+  snapshot_path: String,
+  timeout_ms: Int,
+) -> Result(PullSummary, String) {
+  subscription_progress.start(
+    data_root,
+    phase,
+    worker_key,
+    channel,
+    phase_total,
+  )
+  let archive_ready = case string.is_empty(snapshot_path) {
+    True -> Ok(Nil)
+    False -> download_history.write_snapshot(data_root, snapshot_path)
+  }
+  case archive_ready {
+    Error(message) -> {
+      let error = "cannot prepare idempotency archive: " <> message
+      subscription_progress.finish(data_root, phase, worker_key, Error(error))
+      Error(error)
+    }
+    Ok(Nil) ->
+      run_engine(
+        data_root,
+        phase,
+        worker_key,
+        config_file,
+        subscriptions_file,
+        timeout_ms,
+      )
+  }
+}
+
+fn run_engine(
+  data_root: String,
+  phase: String,
+  worker_key: String,
+  config_file: String,
+  subscriptions_file: String,
+  timeout_ms: Int,
+) -> Result(PullSummary, String) {
   let args = [
     "--suppress-colors",
     "--config",
-    layout.config_file,
+    config_file,
     "sub",
     subscriptions_file,
   ]
-
-  case shell.run_with_timeout(engine_command, args, timeout_ms) {
-    Ok(result) -> interpret_run_result(result.exit_code, result.stdout)
+  let outcome = case
+    shell.run_with_timeout_and_output(
+      engine_command,
+      args,
+      timeout_ms,
+      fn(line) {
+        subscription_progress.observe(data_root, phase, worker_key, line)
+      },
+    )
+  {
+    Ok(output) -> {
+      // Preserve the engine output on the data disk for troubleshooting.
+      let directory =
+        subscriptions_file
+        |> string.split("/")
+        |> list.reverse
+        |> list.drop(1)
+        |> list.reverse
+        |> string.join("/")
+      let _ = simplifile.write(directory <> "/download.log", output.stdout)
+      interpret_run_result(output.exit_code, output.stdout)
+    }
     Error(shell.ExecutionError(message)) ->
       Error("execution error: " <> message)
     Error(shell.InvalidCommand(message)) ->
       Error("invalid command: " <> message)
+  }
+  let outcome = case download_history.refresh(data_root) {
+    Ok(_) -> outcome
+    Error(message) ->
+      case outcome {
+        Ok(_) ->
+          Error(
+            "download history refresh failed after engine completion: "
+            <> message,
+          )
+        Error(engine_error) ->
+          Error(
+            engine_error
+            <> "; download history refresh also failed: "
+            <> message,
+          )
+      }
+  }
+  subscription_progress.finish(data_root, phase, worker_key, outcome)
+  outcome
+}
+
+fn phase_name(subscriptions_file: String) -> String {
+  case string.contains(subscriptions_file, "recent") {
+    True -> "recent"
+    False -> "backfill"
+  }
+}
+
+fn worker_key(config_file: String) -> String {
+  case string.split(config_file, "/parallel/") {
+    [_, rest, ..] ->
+      case string.split(rest, "/") {
+        [key, ..] -> key
+        [] -> "single"
+      }
+    _ -> "single"
+  }
+}
+
+fn channel_label(subscriptions_file: String) -> String {
+  case simplifile.read(subscriptions_file) {
+    Error(_) -> "Subscription run"
+    Ok(content) ->
+      case
+        list.find(string.split(content, "\n"), fn(line) {
+          string.contains(line, "\": \"https://")
+        })
+      {
+        Ok(line) ->
+          case string.split(string.trim(line), "\": \"") {
+            [label, ..] -> string.drop_start(label, 1)
+            _ -> "Subscription run"
+          }
+        Error(_) -> "Subscription run"
+      }
   }
 }
 
@@ -1030,52 +1582,106 @@ pub fn to_discovered_video(
   }
 
   let basename = drop_extension(filename)
-  let #(title, published_at) = split_episode_title(basename)
+  let #(filename_title, filename_published_at) = split_episode_title(basename)
+  let metadata = media_info.read(path, metadata_cache_dir(library_dir))
+  let title = case metadata {
+    Some(value) -> option_unwrap(value.title, filename_title)
+    None -> filename_title
+  }
+  let published_at = case metadata {
+    Some(value) ->
+      case value.upload_date {
+        Some(date) ->
+          option_int_unwrap(upload_date_timestamp(date), filename_published_at)
+        None -> filename_published_at
+      }
+    None -> filename_published_at
+  }
+  let channel_name = case channel {
+    "" ->
+      case metadata {
+        Some(value) -> option_unwrap(value.channel, channel)
+        None -> channel
+      }
+    _ -> channel
+  }
+  let webpage_url = case metadata {
+    Some(value) -> option_unwrap(value.webpage_url, "file://" <> path)
+    None -> "file://" <> path
+  }
+  let duration = case metadata {
+    Some(value) -> value.duration
+    None -> None
+  }
+  let thumbnail = case metadata {
+    Some(value) -> value.thumbnail
+    None -> None
+  }
   // Prefer the stable YouTube id from the engine's sidecar: the file name can
   // change (re-titles, aliases), the id cannot, so records stay unique
-  let #(video_id, channel_id) = sidecar_identity(path, relative)
+  let video_id = case metadata {
+    Some(value) -> option_unwrap(value.id, relative)
+    None -> relative
+  }
+  let channel_id = case metadata {
+    Some(value) -> value.channel_id
+    None -> None
+  }
 
   DiscoveredVideo(
     video_id: video_id,
     channel_id: channel_id,
-    channel_name: case channel {
+    channel_name: case channel_name {
       "" -> None
       name -> Some(name)
     },
     title: title,
-    url: "file://" <> path,
+    url: webpage_url,
     published_at: published_at,
-    duration_seconds: None,
-    thumbnail_url: None,
+    duration_seconds: duration,
+    thumbnail_url: thumbnail,
   )
 }
 
-/// Identity for a media file: the sidecar's id/channel_id when available
-fn sidecar_identity(
-  media_path: String,
-  fallback_id: String,
-) -> #(String, Option(String)) {
-  let sidecar = drop_extension(media_path) <> ".info.json"
-  case simplifile.read(sidecar) {
-    Ok(content) ->
-      case json.parse(content, sidecar_identity_decoder()) {
-        Ok(#(Some(id), channel_id)) -> #(id, channel_id)
-        _ -> #(fallback_id, None)
+fn option_unwrap(value: Option(String), fallback: String) -> String {
+  case value {
+    Some(nonempty) ->
+      case string.is_empty(string.trim(nonempty)) {
+        True -> fallback
+        False -> string.trim(nonempty)
       }
-    Error(_) -> #(fallback_id, None)
+    _ -> fallback
   }
 }
 
-fn sidecar_identity_decoder() -> decode.Decoder(
-  #(Option(String), Option(String)),
-) {
-  use id <- decode.optional_field("id", None, decode.optional(decode.string))
-  use channel_id <- decode.optional_field(
-    "channel_id",
-    None,
-    decode.optional(decode.string),
-  )
-  decode.success(#(id, channel_id))
+fn option_int_unwrap(value: Option(Int), fallback: Option(Int)) -> Option(Int) {
+  case value {
+    Some(_) -> value
+    None -> fallback
+  }
+}
+
+fn upload_date_timestamp(date: String) -> Option(Int) {
+  case string.length(date) == 8 {
+    True ->
+      parse_episode_date(
+        "s"
+        <> string.slice(date, 0, 4)
+        <> ".e"
+        <> string.slice(date, 4, 4)
+        <> "00",
+      )
+    False -> None
+  }
+}
+
+/// Identity for a media file: the sidecar's id/channel_id when available
+fn metadata_cache_dir(library_dir: String) -> String {
+  case string.ends_with(library_dir, "/library") {
+    True -> string.drop_end(library_dir, string.length("/library"))
+    False -> library_dir
+  }
+  <> "/cache/video-metadata"
 }
 
 /// Split "s2026.e091101 - Title" into title and upload timestamp
@@ -1145,6 +1751,11 @@ fn drop_extension(filename: String) -> String {
         [] -> filename
       }
   }
+}
+
+/// Return the ytdl-sub info sidecar path for a media file.
+pub fn info_json_path(media_path: String) -> String {
+  drop_extension(media_path) <> ".info.json"
 }
 
 /// List the media files currently in the library
@@ -1244,8 +1855,70 @@ fn is_channel_url(url: String) -> Bool {
   }
 }
 
+pub fn is_explicit_video_url(url: String) -> Bool {
+  let #(base, query) = split_once(canonical_channel_url(url), "?")
+  let parts = string.split(base, "/")
+  case parts {
+    [_, "", "youtu.be", video_id] -> !string.is_empty(video_id)
+    [_, "", host, "watch"] ->
+      case is_youtube_host(host) {
+        True -> query_has_video_id(query)
+        False -> False
+      }
+    [_, "", host, kind, video_id] ->
+      is_youtube_host(host)
+      && list.contains(["shorts", "live", "embed"], kind)
+      && !string.is_empty(video_id)
+    _ -> False
+  }
+}
+
+fn query_has_video_id(query: Option(String)) -> Bool {
+  case query {
+    Some(value) ->
+      list.any(string.split(value, "&"), fn(part) {
+        string.starts_with(part, "v=") && string.length(part) > 2
+      })
+    None -> False
+  }
+}
+
 fn is_youtube_host(host: String) -> Bool {
   list.contains(["youtube.com", "www.youtube.com", "m.youtube.com"], host)
+}
+
+/// Match yt-dlp's default filename sanitization for subscription directory
+/// labels. The installed ytdl-sub preset uses tv_show_name_sanitized, backed
+/// by yt-dlp sanitize_filename(restricted=False).
+fn sanitize_show_directory(label: String) -> String {
+  let label =
+    label
+    |> string.replace("/", "⧸")
+    |> string.replace("\\", "⧹")
+    |> string.replace("\"", "＂")
+    |> string.replace("*", "＊")
+    |> string.replace(":", "：")
+    |> string.replace("<", "＜")
+    |> string.replace(">", "＞")
+    |> string.replace("?", "？")
+    |> string.replace("|", "｜")
+    |> string.replace("\n", " ")
+  let label = drop_leading_dots(label)
+  case string.starts_with(label, "-") {
+    True -> "_" <> string.drop_start(label, 1)
+    False ->
+      case string.is_empty(label) {
+        True -> "_"
+        False -> label
+      }
+  }
+}
+
+fn drop_leading_dots(value: String) -> String {
+  case string.starts_with(value, ".") {
+    True -> drop_leading_dots(string.drop_start(value, 1))
+    False -> value
+  }
 }
 
 fn valid_channel_id(id: String) -> Bool {
@@ -1262,12 +1935,13 @@ fn unique_labels(channels: List(Channel)) -> List(Channel) {
   let reserved =
     list.map(channels, fn(channel) {
       option.unwrap(channel.label, subscription_label(channel.url))
+      |> sanitize_show_directory
     })
   let #(reversed, _) =
     list.fold(channels, #([], []), fn(acc, channel) {
       let #(out, used) = acc
       let label = option.unwrap(channel.label, subscription_label(channel.url))
-      let label = case list.contains(used, label) {
+      let label = case list.contains(used, sanitize_show_directory(label)) {
         False -> label
         True -> {
           let suffix =
@@ -1279,7 +1953,10 @@ fn unique_labels(channels: List(Channel)) -> List(Channel) {
           available_label(label <> " (" <> suffix <> ")", reserved, used, 1)
         }
       }
-      #([Channel(Some(label), channel.url), ..out], [label, ..used])
+      #([Channel(Some(label), channel.url), ..out], [
+        sanitize_show_directory(label),
+        ..used
+      ])
     })
   list.reverse(reversed)
 }
@@ -1294,7 +1971,11 @@ fn available_label(
     1 -> base
     _ -> base <> " " <> int.to_string(number)
   }
-  case list.contains(reserved, candidate) || list.contains(used, candidate) {
+  let safe_candidate = sanitize_show_directory(candidate)
+  case
+    list.contains(reserved, safe_candidate)
+    || list.contains(used, safe_candidate)
+  {
     True -> available_label(base, reserved, used, number + 1)
     False -> candidate
   }

@@ -63,6 +63,17 @@ pub fn run_with_timeout(
   args: List(String),
   timeout_ms: Int,
 ) -> Result(ShellResult, ShellError) {
+  run_with_timeout_and_output(command, args, timeout_ms, fn(_) { Nil })
+}
+
+/// Execute a command with a total deadline and report each output line as it
+/// arrives. The callback runs synchronously in the command's owning process.
+pub fn run_with_timeout_and_output(
+  command: String,
+  args: List(String),
+  timeout_ms: Int,
+  on_output: fn(String) -> Nil,
+) -> Result(ShellResult, ShellError) {
   // Validate command doesn't contain shell metacharacters
   case validate_command(command) {
     Error(e) -> Error(e)
@@ -72,7 +83,9 @@ pub fn run_with_timeout(
       let deadline = monotonic_milliseconds() + timeout_ms
       use stream <- result.try(open_stream(command, args))
 
-      case read_with_deadline(stream, deadline, None, False, [], []) {
+      case
+        read_with_deadline(stream, deadline, None, False, [], [], on_output)
+      {
         Ok(#(exit_code, stdout_lines, stderr_lines)) -> {
           close_stream(stream)
           Ok(ShellResult(
@@ -106,6 +119,7 @@ fn read_with_deadline(
   saw_eof: Bool,
   stdout_acc: List(String),
   stderr_acc: List(String),
+  on_output: fn(String) -> Nil,
 ) -> Result(#(Int, List(String), List(String)), ShellError) {
   case remaining_time(deadline) {
     Error(_) ->
@@ -117,6 +131,7 @@ fn read_with_deadline(
       case read_stream_line_with_timeout(stream, remaining) {
         Ok(OutputLine(line)) -> {
           // All output goes to stdout (stderr is harder to separate in ports)
+          on_output(line)
           read_with_deadline(
             stream,
             deadline,
@@ -124,6 +139,7 @@ fn read_with_deadline(
             saw_eof,
             [line, ..stdout_acc],
             stderr_acc,
+            on_output,
           )
         }
         Ok(ProcessExit(code)) ->
@@ -139,6 +155,7 @@ fn read_with_deadline(
                 saw_eof,
                 stdout_acc,
                 stderr_acc,
+                on_output,
               )
               |> result.map(fn(res) {
                 let #(_, out, err) = res
@@ -159,6 +176,7 @@ fn read_with_deadline(
                 True,
                 stdout_acc,
                 stderr_acc,
+                on_output,
               )
           }
         Ok(StreamError(message)) ->
@@ -377,6 +395,15 @@ pub fn read_stream_line(stream: StreamingPort) -> StreamLine {
 pub fn close_stream(stream: StreamingPort) -> Nil {
   do_close_port(stream.port)
 }
+
+/// Stop downloader processes left behind by a previous BEAM crash.
+/// Records are verified against VM and OS-process fingerprints before a kill.
+pub fn recover_orphan_downloads() -> Int {
+  do_recover_orphan_downloads()
+}
+
+@external(erlang, "shell_ffi", "recover_orphan_downloads")
+fn do_recover_orphan_downloads() -> Int
 
 /// Kill the process behind a stream and its children
 ///

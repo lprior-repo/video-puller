@@ -3,18 +3,14 @@
 /// Main entry point for the application. Implements a proper BEAM architecture:
 /// - Worker pool for massive parallel downloads
 /// - BEAM-native scheduling (no infinite recursion)
-import core/manager
+import core/service_supervisor
 import core/startup
-import core/subscription_manager
 import engine/ytdlp
 import envoy
 import gleam/erlang/process
 import gleam/int
 import gleam/io
-import gleam/option.{None, Some}
 import gleam/string
-import infra/subscription_repo
-import web/server
 
 /// Main entry point for the application
 pub fn main() -> Nil {
@@ -42,59 +38,24 @@ pub fn main() -> Nil {
       io.println("   Max concurrency: " <> int.to_string(max_concurrency))
       io.println("")
 
-      // Start the manager actor (now includes worker pool and scheduling)
-      case manager.start(db, config, poll_interval, max_concurrency) {
-        Ok(_manager_subject) -> {
-          io.println("✅ Manager started with BEAM optimizations")
-
-          // Note: Polling is now handled internally by the manager
-          // using BEAM's native timer:send_after - NO MORE RECURSION!
-
-          // Start subscription manager
-          let sub_manager = case subscription_manager.start(db) {
-            Ok(sub_subject) -> {
-              io.println("📺 Subscription manager started")
-              // Report the schedule; the manager arms its own timer as soon as
-              // it receives its self reference, so there is nothing to kick
-              case subscription_repo.get_config(db) {
-                Ok(sub_config) if sub_config.enabled ->
-                  io.println("   Auto-download enabled, scheduling polls")
-                _ -> Nil
-              }
-              Some(sub_subject)
-            }
-            Error(_) -> {
-              io.println("⚠️  Subscription manager failed to start (non-fatal)")
-              None
-            }
-          }
-
-          // Start the web server with subscription manager
-          case server.start_with_subscription(db, sub_manager) {
-            Ok(_) -> {
-              io.println("")
-              io.println("✅ Application started successfully!")
-              io.println("")
-              io.println(
-                "🚀 Ready to handle MASSIVE parallel downloads (500+ videos)",
-              )
-              io.println("")
-              io.println("Press Ctrl+C to stop")
-
-              // Keep the main process alive
-              // The BEAM will handle all scheduling and supervision
-              process.sleep_forever()
-            }
-            Error(err) -> {
-              io.println("")
-              io.println("❌ Failed to start web server")
-              io.println("Error: " <> err)
-            }
-          }
-        }
-        Error(_) -> {
+      case
+        service_supervisor.start(db, config, poll_interval, max_concurrency)
+      {
+        Ok(_services) -> {
           io.println("")
-          io.println("❌ Failed to start manager")
+          io.println("✅ Application started under OTP supervision!")
+          io.println("")
+          io.println(
+            "🚀 Ready to handle MASSIVE parallel downloads (500+ videos)",
+          )
+          io.println("")
+          io.println("Press Ctrl+C to stop")
+          process.sleep_forever()
+        }
+        Error(err) -> {
+          io.println("")
+          io.println("❌ Failed to start supervised application services")
+          io.println("Error: " <> string.inspect(err))
         }
       }
     }

@@ -4,7 +4,10 @@
 /// - Preparing the ytdl-sub engine layout for subscription pulls
 /// - Running database migrations (INV-002: must run before app start)
 /// - Fixing zombie jobs (INV-003: revert processing jobs to pending)
+import core/channel_reconciler
+import core/storage_guard
 import core/subscription_manager
+import engine/shell
 import engine/takeout
 import engine/ytdl_sub
 import envoy
@@ -15,11 +18,25 @@ import gleam/result
 import gleam/string
 import infra/db.{type Db, type DbError}
 import infra/migrator
+import infra/plex
 import infra/repo
 import simplifile
 
 /// Run the complete startup sequence
 pub fn initialize() -> Result(Db, DbError) {
+  use _ <- result.try(
+    storage_guard.check_volume() |> result.map_error(db.ConnectionError),
+  )
+  let recovered_downloaders = shell.recover_orphan_downloads()
+  case recovered_downloaders > 0 {
+    True ->
+      io.println(
+        "🧹 Stopped "
+        <> int.to_string(recovered_downloaders)
+        <> " orphaned downloader process(es)",
+      )
+    False -> Nil
+  }
   io.println("🚀 Starting FractalVideoEater...")
 
   // Get database path from environment or use default
@@ -50,6 +67,14 @@ pub fn initialize() -> Result(Db, DbError) {
   // Merge a dropped Google Takeout subscriptions.csv into channels.txt
   let layout = ytdl_sub.layout_from_env()
   takeout.import_and_log(layout)
+  use _ <- result.try(
+    channel_reconciler.reconcile(conn, layout)
+    |> result.map_error(db.ConnectionError),
+  )
+  // Cleanup may recover a low disk, but downloads must wait for the reserve.
+  use _ <- result.try(
+    storage_guard.check() |> result.map_error(db.ConnectionError),
+  )
 
   // Record library files left by a poll that was interrupted earlier: the
   // engine's archive skips them, so nothing else would ever record them
@@ -58,6 +83,9 @@ pub fn initialize() -> Result(Db, DbError) {
     layout.library_dir,
     get_current_timestamp(),
   ))
+
+  plex.enrich_titles(layout.library_dir)
+  plex.refresh_library()
 
   // Fix zombie jobs
   io.println("🧟 Checking for zombie jobs...")

@@ -398,6 +398,80 @@ pub fn layout_resolves_relative_root_test() {
   string.ends_with(layout.library_dir, "/data/library") |> should.be_true()
 }
 
+pub fn ensure_layout_ignores_scratch_without_ignoring_library_test() {
+  let root = "/tmp/test_vp_plexignore"
+  let path = root <> "/.plexignore"
+  let _ = simplifile.create_directory_all(root)
+  let _ = simplifile.write(path, "# keep this rule\ncustom/*\n")
+  ytdl_sub.ensure_layout(ytdl_sub.layout(root)) |> should.be_ok()
+  let assert Ok(content) = simplifile.read(path)
+
+  string.contains(content, "# keep this rule") |> should.be_true()
+  string.contains(content, "custom/*") |> should.be_true()
+  string.contains(content, "ytdl-sub/*") |> should.be_true()
+  string.contains(content, "tmp/*") |> should.be_true()
+  string.contains(content, "cache/*") |> should.be_true()
+  string.contains(content, "retired-library/*") |> should.be_true()
+  list.contains(string.split(content, "\n"), "library/*")
+  |> should.be_false()
+}
+
+pub fn managed_labels_reconcile_using_cached_ids_and_ytdlp_sanitization_test() {
+  let root = "/tmp/test_ytdl_sub_managed_labels"
+  let library = root <> "/library"
+  let cache = root <> "/channel_ids.tsv"
+  let _ = simplifile.create_directory_all(library)
+  let _ =
+    simplifile.write(cache, "https://www.youtube.com/@alias\tUCsame\tChannel\n")
+  let channels = [
+    ytdl_sub.Channel(
+      Some("Dua Lipa: Live/2024"),
+      "https://www.youtube.com/@alias",
+    ),
+    ytdl_sub.Channel(
+      Some("Other Name"),
+      "https://www.youtube.com/channel/UCsame",
+    ),
+  ]
+
+  ytdl_sub.managed_labels(channels, cache, library)
+  |> should.equal(["Dua Lipa： Live⧸2024"])
+}
+
+pub fn managed_labels_use_cached_title_for_unlabeled_channel_test() {
+  let root = "/tmp/test_ytdl_sub_cached_managed_label"
+  let cache = root <> "/channel_ids.tsv"
+  let _ = simplifile.create_directory_all(root)
+  let _ =
+    simplifile.write(
+      cache,
+      "https://www.youtube.com/@alias\tUCsame\tExisting Display Name\n",
+    )
+
+  ytdl_sub.managed_labels(
+    [ytdl_sub.Channel(None, "https://www.youtube.com/@alias")],
+    cache,
+    root <> "/library",
+  )
+  |> should.equal(["Existing Display Name"])
+}
+
+pub fn managed_labels_resolve_collisions_after_ytdlp_sanitization_test() {
+  let root = "/tmp/test_ytdl_sub_sanitized_collision"
+  let _ = simplifile.create_directory_all(root)
+  ytdl_sub.managed_labels(
+    [
+      ytdl_sub.Channel(Some("Foo?"), "https://www.youtube.com/@one"),
+      ytdl_sub.Channel(Some("Foo？"), "https://www.youtube.com/@two"),
+    ],
+    root <> "/channel_ids.tsv",
+    root <> "/library",
+  )
+  |> should.equal(["Foo？", "Foo？ (two)"])
+  let _ = simplifile.delete(root)
+  Nil
+}
+
 // =============================================================================
 // Channel identity lookups
 
@@ -418,7 +492,11 @@ pub fn canonical_channel_url_keeps_content_query_test() {
   ytdl_sub.canonical_channel_url(
     "https://www.youtube.com/watch?v=jNQXAC9IVRw&t=1s",
   )
-  |> should.equal("https://www.youtube.com/watch?v=jNQXAC9IVRw&t=1s")
+  |> should.equal("https://www.youtube.com/watch?v=jNQXAC9IVRw")
+  ytdl_sub.canonical_channel_url("https://youtu.be/jNQXAC9IVRw?t=1s")
+  |> should.equal("https://www.youtube.com/watch?v=jNQXAC9IVRw")
+  ytdl_sub.youtube_video_id("https://www.youtube.com/shorts/jNQXAC9IVRw")
+  |> should.equal(Some("jNQXAC9IVRw"))
 
   ytdl_sub.canonical_channel_url("https://www.youtube.com/playlist?list=PL123")
   |> should.equal("https://www.youtube.com/playlist?list=PL123")
@@ -427,6 +505,97 @@ pub fn canonical_channel_url_keeps_content_query_test() {
     "https://www.youtube.com/@Fireship/videos?view=0#tabs",
   )
   |> should.equal("https://www.youtube.com/@Fireship")
+}
+
+pub fn explicit_video_jobs_bypass_age_filter_in_both_phases_test() {
+  let root = "/tmp/test_ytdl_sub_video_age_window"
+  let base = ytdl_sub.layout(root)
+  let layout = ytdl_sub.Layout(..base, workers: 1, download_days: 30)
+  let _ = simplifile.create_directory_all(root <> "/ytdl-sub")
+  let _ = simplifile.delete(root <> "/ytdl-sub/poll_cursor.txt")
+  let channels = [
+    ytdl_sub.Channel(
+      Some("Channel Archive"),
+      "https://www.youtube.com/channel/UC1234567890",
+    ),
+    ytdl_sub.Channel(
+      Some("Dua Lipa Requested Videos"),
+      "https://www.youtube.com/watch?v=3DcoC8p9az8",
+    ),
+  ]
+  ytdl_sub.write_subscriptions_with_budget(layout, channels, 0)
+  |> should.be_ok()
+
+  assert_manifest_age_window(layout.recent_subscriptions_file <> ".jobs")
+  assert_manifest_age_window(layout.subscriptions_file <> ".jobs")
+  let assert Ok(manifest) =
+    simplifile.read(layout.recent_subscriptions_file <> ".jobs")
+  let assert [first, ..] = string.split(manifest, "\n")
+  let assert [_, path, _, _] = string.split(first, "\t")
+  let assert Ok(content) = simplifile.read(path)
+  string.contains(content, "Dua Lipa Requested Videos") |> should.be_true()
+}
+
+pub fn legacy_and_partial_job_manifests_fail_closed_test() {
+  let root = "/tmp/test_ytdl_sub_manifest_fail_closed"
+  let _ = simplifile.delete_all([root])
+  let layout = ytdl_sub.layout(root)
+  let _ = simplifile.create_directory_all(root <> "/ytdl-sub")
+  let manifest_path = layout.subscriptions_file <> ".jobs"
+
+  simplifile.write(manifest_path, "config.yaml\tsubscriptions.yaml")
+  |> should.be_ok()
+  ytdl_sub.run_pull(layout, layout.subscriptions_file, 1000)
+  |> should.be_error()
+
+  simplifile.write(
+    manifest_path,
+    "config.yaml\tsubscriptions.yaml\tparallel\tarchive.txt\n"
+      <> "malformed-second-row",
+  )
+  |> should.be_ok()
+  ytdl_sub.run_pull(layout, layout.subscriptions_file, 1000)
+  |> should.be_error()
+
+  simplifile.write(
+    manifest_path,
+    "config.yaml\tsubscriptions.yaml\tparallel\tarchive.txt\n\n"
+      <> "other.yaml\tother.yaml\tserial\tother-archive.txt",
+  )
+  |> should.be_ok()
+  ytdl_sub.run_pull(layout, layout.subscriptions_file, 1000)
+  |> should.be_error()
+
+  simplifile.write(manifest_path, "\n  \n") |> should.be_ok()
+  ytdl_sub.run_pull(layout, layout.subscriptions_file, 1000)
+  |> should.be_error()
+  let _ = simplifile.delete_all([root])
+  Nil
+}
+
+fn assert_manifest_age_window(path: String) {
+  let assert Ok(manifest) = simplifile.read(path)
+  let subscriptions =
+    manifest
+    |> string.split("\n")
+    |> list.map(fn(row) {
+      case string.split(row, "\t") {
+        [_, subscriptions_file, _, _] ->
+          simplifile.read(subscriptions_file) |> should.be_ok()
+        _ -> ""
+      }
+    })
+  let assert Ok(video_config) =
+    list.find(subscriptions, fn(content) {
+      string.contains(content, "Dua Lipa Requested Videos")
+    })
+  let assert Ok(channel_config) =
+    list.find(subscriptions, fn(content) {
+      string.contains(content, "Channel Archive")
+    })
+
+  string.contains(video_config, "after: \"today-30days\"") |> should.be_false()
+  string.contains(channel_config, "after: \"today-30days\"") |> should.be_true()
 }
 
 // =============================================================================
@@ -449,6 +618,30 @@ pub fn to_discovered_video_uses_sidecar_identity_test() {
   video.video_id |> should.equal("abc123")
   video.channel_id |> should.equal(Some("UCxyz"))
   video.title |> should.equal("Video One")
+}
+
+/// Rich info JSON restores the raw title and optional download details.
+pub fn to_discovered_video_uses_sidecar_metadata_test() {
+  let dir = "/tmp/test_vp_sidecar_metadata"
+  let season_dir = dir <> "/Channel One/Season 2024"
+  let media = season_dir <> "/s2024.e072100 - Sanitized Video.mp4"
+  let _ = simplifile.create_directory_all(season_dir)
+  let _ =
+    simplifile.write(
+      season_dir <> "/s2024.e072100 - Sanitized Video.info.json",
+      "{\"id\":\"video123\",\"channel_id\":\"UC123\",\"title\":\"Raw video title\",\"channel\":\"Original Channel\",\"upload_date\":\"20240721\",\"duration\":129.7,\"thumbnail\":\"https://i.ytimg.com/thumb.jpg\",\"webpage_url\":\"https://www.youtube.com/watch?v=video123\"}",
+    )
+
+  let video = ytdl_sub.to_discovered_video(dir, media)
+
+  video.title |> should.equal("Raw video title")
+  video.channel_name |> should.equal(Some("Channel One"))
+  video.published_at |> should.equal(Some(1_721_520_000))
+  video.duration_seconds |> should.equal(Some(130))
+  video.thumbnail_url
+  |> should.equal(Some("https://i.ytimg.com/thumb.jpg"))
+  video.url
+  |> should.equal("https://www.youtube.com/watch?v=video123")
 }
 
 /// Without a usable sidecar the library-relative path identifies the record

@@ -1,5 +1,13 @@
 -module(shell_test_ffi).
--export([new_pid_file/0, descendant_stopped/1, guardian_kills_tree/0]).
+-export([
+    new_pid_file/0,
+    descendant_stopped/1,
+    guardian_kills_tree/0,
+    set_env/2,
+    unset_env/1,
+    process_running/1,
+    delete_tree/1
+]).
 
 new_pid_file() ->
     list_to_binary("/tmp/vp-shell-test-" ++ os:getpid() ++ "-" ++
@@ -45,6 +53,26 @@ guardian_kills_tree() ->
     exit(Owner, kill),
     Stopped = descendant_stopped(Path),
     Ready andalso Stopped.
+
+set_env(Key, Value) ->
+    os:putenv(binary_to_list(Key), binary_to_list(Value)).
+
+unset_env(Key) ->
+    os:unsetenv(binary_to_list(Key)).
+
+process_running(PidValue) ->
+    case string:to_integer(binary_to_list(PidValue)) of
+        {Pid, []} when Pid > 1 ->
+            Status = string:trim(os:cmd("ps -p " ++ integer_to_list(Pid) ++ " -o stat= 2>/dev/null")),
+            Status =/= [] andalso not lists:prefix("Z", Status);
+        _ -> false
+    end.
+
+delete_tree(PathValue) ->
+    case file:del_dir_r(binary_to_list(PathValue)) of
+        ok -> true;
+        _ -> false
+    end.
 
 await_file(_, 0) -> false;
 await_file(Path, Attempts) ->

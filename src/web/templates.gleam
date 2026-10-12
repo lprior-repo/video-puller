@@ -6,21 +6,22 @@ import domain/core_types.{
   type VideoStatus, Completed, Downloading, Failed, Pending, job_id_to_string,
 }
 import domain/subscription_types.{
-  type PollResult, type SeenVideo, type SubscriptionConfig,
-  type SubscriptionStatus,
+  type SeenVideo, type SubscriptionConfig, type SubscriptionStatus,
 }
 import domain/types.{type VideoJob}
+import engine/subscription_progress.{type Snapshot}
+import engine/subscription_settings.{type Settings}
 import engine/ytdlp
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/string
 import lustre/attribute.{attribute, class, href, name, placeholder, type_}
 import lustre/element.{type Element, text}
 import lustre/element/html.{
-  a, body, button, details, div, form, h1, h2, head, html, input, label, li,
-  link, main, meta, nav, option, p, script, select, span, style, summary, title,
-  ul,
+  a, body, button, details, div, form, h1, h2, h4, head, html, img, input, label,
+  li, link, main, meta, nav, option, p, script, select, span, style, summary,
+  textarea, title, ul,
 }
 
 /// Base HTML layout wrapper
@@ -40,7 +41,7 @@ pub fn layout(page_title: String, content: Element(a)) -> String {
       style([], inline_styles()),
     ]),
     body([class("min-h-screen bg-gray-900 text-gray-100 flex-layout")], [
-      sidebar(),
+      sidebar(page_title),
       main([class("main-content flex-grow px-4 py-8")], [content]),
     ]),
   ])
@@ -112,7 +113,8 @@ fn inline_styles() -> String {
 
   /* Sidebar Navigation */
   .nav-sidebar {
-    width: 15%;
+    width: 230px;
+    flex: 0 0 230px;
     background-color: #08080C;
     padding: 1.25rem 0;
     display: flex;
@@ -151,6 +153,15 @@ fn inline_styles() -> String {
 
   .main-content {
     overflow-y: auto;
+  }
+
+  @media (max-width: 768px) {
+    .flex-layout { flex-direction: column; }
+    .nav-sidebar { width: 100%; flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; padding: 8px; }
+    .nav-logo { width: 100%; padding: 4px 8px 10px; }
+    .main-content { padding: 16px; }
+    .setting-row { flex-direction: column; gap: 12px; }
+    .setting-input { width: 100%; min-width: 0; }
   }
 
   /* Neon Pink Download Card Styles */
@@ -532,15 +543,28 @@ fn inline_styles() -> String {
 }
 
 /// Sidebar navigation component
-fn sidebar() -> Element(a) {
+fn sidebar(page_title: String) -> Element(a) {
   nav([class("nav-sidebar")], [
     div([class("nav-logo")], [text("GleanDown")]),
-    a([href("/"), class("nav-item active")], [text("Glean It")]),
-    a([href("/queue"), class("nav-item")], [text("Queue")]),
-    a([href("/subscriptions"), class("nav-item")], [text("Subscriptions")]),
-    a([href("/history"), class("nav-item")], [text("History")]),
-    a([href("/settings"), class("nav-item")], [text("Settings")]),
+    sidebar_link("/download", "Download", "Download", page_title),
+    sidebar_link("/queue", "Queue", "Queue", page_title),
+    sidebar_link("/subscriptions", "Subscriptions", "Subscriptions", page_title),
+    sidebar_link("/history", "History", "History", page_title),
+    sidebar_link("/settings", "Settings", "Settings", page_title),
   ])
+}
+
+fn sidebar_link(
+  path: String,
+  name: String,
+  label: String,
+  page_title: String,
+) -> Element(a) {
+  let item_class = case page_title == name {
+    True -> "nav-item active"
+    False -> "nav-item"
+  }
+  a([href(path), class(item_class)], [text(label)])
 }
 
 /// Open folder button component
@@ -638,6 +662,7 @@ fn glean_it_form() -> Element(a) {
       [
         attribute("action", "/jobs"),
         attribute("method", "POST"),
+        class("download-form"),
       ],
       [
         input([
@@ -765,7 +790,7 @@ fn job_list(jobs: List(VideoJob)) -> Element(a) {
 fn empty_state() -> Element(a) {
   div([class("bg-gray-800 rounded-lg shadow-lg px-6 py-8 text-center")], [
     p([class("text-gray-400 text-xl mb-4")], [text("No downloads yet")]),
-    p([class("text-gray-400")], [
+    p([class("subscription-library-count")], [
       text("Add a video URL above to start downloading"),
     ]),
   ])
@@ -977,7 +1002,10 @@ fn progress_section(status: VideoStatus) -> Element(a) {
 }
 
 /// Settings page content - now with editable download configuration
-pub fn settings_page(config: ytdlp.DownloadConfig) -> Element(a) {
+pub fn settings_page(
+  config: ytdlp.DownloadConfig,
+  ytdlp_version: String,
+) -> Element(a) {
   div([], [
     h2([class("text-2xl font-bold mb-6")], [text("Download Settings")]),
     // Download Settings Form
@@ -994,7 +1022,9 @@ pub fn settings_page(config: ytdlp.DownloadConfig) -> Element(a) {
               ],
             ),
             div([class("setting-description")], [
-              text("Where downloaded videos will be saved"),
+              text(
+                "Effective download destination. Defaults to OUTPUT_DIR when configured.",
+              ),
             ]),
           ]),
           input([
@@ -1313,7 +1343,7 @@ pub fn settings_page(config: ytdlp.DownloadConfig) -> Element(a) {
       ]),
       div([class("setting-row")], [
         div([class("setting-label")], [text("yt-dlp Version")]),
-        span([class("text-gray-400")], [text("2024.11.18")]),
+        span([class("text-gray-400")], [text(ytdlp_version)]),
       ]),
       div([class("setting-row")], [
         div([class("setting-label")], [text("Database")]),
@@ -1338,130 +1368,522 @@ pub fn error_page(code: Int, message: String) -> Element(a) {
 // Subscription Templates
 // =============================================================================
 
+/// Metadata used to render one YouTube-style card. Optional source fields stay
+/// absent when the database or cached metadata does not contain them.
+pub type FeedCard {
+  FeedCard(
+    video: SeenVideo,
+    plex_url: Option(String),
+    description: Option(String),
+    view_count: Option(Int),
+  )
+}
+
 /// Subscriptions page content
 pub fn subscriptions_page(
   config: SubscriptionConfig,
   status: SubscriptionStatus,
-  recent_videos: List(SeenVideo),
+  recent_videos: List(FeedCard),
   library_dir: String,
+  settings: Settings,
+  ytdlp_version: String,
+  plex_url: Option(String),
+  progress: List(Snapshot),
+  library_count: Int,
 ) -> Element(a) {
   div([], [
-    h2([class("text-2xl font-bold mb-6")], [text("YouTube Subscriptions")]),
-    // Status banner
-    subscription_status_banner(status),
-    // Engine library location
-    div([class("settings-section")], [
-      html.h3([], [text("Library")]),
-      p([class("text-gray-400")], [
-        text("Downloaded videos are written by ytdl-sub to: "),
-        span([class("path")], [text(library_dir)]),
-      ]),
-      p([class("text-sm text-gray-400 mt-2")], [
+    div([class("subscriptions-title-row")], [
+      h2([class("text-2xl font-bold mb-4")], [text("YouTube Subscriptions")]),
+      a(
+        [
+          href("#subscription-settings"),
+          class("settings-jump-link"),
+          attribute(
+            "onclick",
+            "document.getElementById('subscription-controls').open = true",
+          ),
+        ],
+        [text("Settings")],
+      ),
+    ]),
+    details(
+      [
+        class("subscription-controls"),
+        attribute("id", "subscription-controls"),
+      ],
+      [
+        summary([], [text("Settings and channels")]),
+        div([class("subscription-controls-body")], [
+          div([class("settings-section")], [
+            html.h3([], [text("Library")]),
+            p([class("text-gray-400")], [
+              text("Downloaded videos are written by ytdl-sub to: "),
+              span([class("path")], [text(library_dir)]),
+            ]),
+            p([class("text-sm text-gray-400 mt-2")], [
+              text(
+                "Subscription channels are listed in channels.txt beside that folder - one public YouTube channel, playlist or video URL per line, optionally as \"Label = URL\" to name the Plex show. Drop a Google Takeout subscriptions.csv there to import channels without signing in. The upload age limit applies to both poll passes; 0 allows all available history. Independent channels run in parallel up to the configured worker count. No browser cookies are used.",
+              ),
+            ]),
+            channel_add_form(),
+            channel_import_form(),
+            case plex_url {
+              Some(url) ->
+                p([class("text-sm mt-2")], [
+                  a(
+                    [
+                      href(url),
+                      attribute("target", "_blank"),
+                      attribute("rel", "noopener noreferrer"),
+                    ],
+                    [text("Open YouTube library in Plex")],
+                  ),
+                ])
+              None -> div([], [])
+            },
+          ]),
+          subscription_settings_form(config, settings),
+        ]),
+      ],
+    ),
+    // Status and feed refresh independently so unsaved controls survive polling.
+    subscription_live_fragment(status, recent_videos, progress, library_count),
+    div([class("watched-cleanup-note")], [
+      p([], [
         text(
-          "Subscription channels are listed in channels.txt beside that folder - one channel, playlist or video URL per line, optionally as \"Label = URL\" to name the Plex show. Drop a Google Takeout subscriptions.csv there to import channels without signing in. Fetches are sequential and use no browser cookies. Each poll checks every channel's newest uploads first, then continues the full-history backfill, so raise POLL_TIMEOUT_MINUTES for large channels.",
+          "Settings: "
+          <> int.to_string(settings.days)
+          <> " day upload window (0 = unlimited) · "
+          <> int.to_string(settings.workers)
+          <> " workers · restricted videos "
+          <> case settings.skip_restricted {
+            True -> "skipped"
+            False -> "included"
+          }
+          <> " · yt-dlp "
+          <> ytdlp_version,
+        ),
+      ]),
+      p([], [
+        text(
+          "Watched-video cleanup runs from the configured Plex library during reconciliation. Deleted YouTube IDs are kept in the durable archive so those videos are not downloaded again.",
         ),
       ]),
     ]),
-    // Settings form
-    subscription_settings_form(config),
-    // Recent downloads
+    script([], subscription_live_refresh_script()),
+  ])
+}
+
+fn channel_import_form() -> Element(a) {
+  form(
+    [
+      class("channel-import-form"),
+      attribute("action", "/subscriptions/channels"),
+      attribute("method", "POST"),
+    ],
+    [
+      html.h3([], [text("Sync desired channel list")]),
+      p([class("text-sm text-gray-400")], [
+        text(
+          "Paste the complete channel list you want to keep, using copied YouTube subscriptions or lines such as Label = https://www.youtube.com/@handle. This replaces the desired list and triggers reconciliation immediately; removed channels are stopped before the replacement poll and their library data is retired by the app.",
+        ),
+      ]),
+      textarea(
+        [
+          name("channel_text"),
+          attribute("rows", "7"),
+          attribute("required", ""),
+          placeholder(
+            "Channel name\n@channelhandle•12.3K subscribers\nSubscribed",
+          ),
+          attribute("aria-label", "Channel list to import"),
+        ],
+        "",
+      ),
+      button([type_("submit")], [text("Sync channel list")]),
+    ],
+  )
+}
+
+fn channel_add_form() -> Element(a) {
+  form(
+    [
+      class("channel-add-form"),
+      attribute("action", "/subscriptions/channels/add"),
+      attribute("method", "POST"),
+    ],
+    [
+      html.h3([], [text("Add one channel")]),
+      p([class("text-sm text-gray-400")], [
+        text(
+          "Add a single channel, playlist, or video URL to the desired list. This addition remains when you add more channels later.",
+        ),
+      ]),
+      input([
+        type_("url"),
+        name("channel_url"),
+        placeholder("https://www.youtube.com/@channel"),
+        attribute("required", ""),
+        attribute("aria-label", "YouTube URL"),
+      ]),
+      input([
+        type_("text"),
+        name("channel_label"),
+        placeholder("Optional display name"),
+        attribute("aria-label", "Optional channel display name"),
+      ]),
+      button([type_("submit")], [text("Add channel")]),
+    ],
+  )
+}
+
+pub fn channel_import_result(
+  added: Int,
+  removed: Int,
+  found: Int,
+) -> Element(a) {
+  div([class("settings-section")], [
+    html.h2([], [text("Channel import complete")]),
+    p([], [
+      text(
+        "Desired list saved: "
+        <> int.to_string(found)
+        <> " channel(s), with "
+        <> int.to_string(added)
+        <> " new and "
+        <> int.to_string(removed)
+        <> " removed. Reconciliation starts immediately, stopping old-channel work before the replacement poll; removed channels are retired by the app.",
+      ),
+    ]),
+    p([class("mt-4")], [
+      a([href("/subscriptions")], [text("Return to subscriptions")]),
+    ]),
+  ])
+}
+
+fn subscription_live_refresh_script() -> String {
+  "
+  (function(){
+    const live = document.getElementById('subscription-live');
+    if (!live) return;
+    const refresh = async () => {
+      try {
+        const response = await fetch('/subscriptions/live', { headers: { 'Accept': 'text/html' }, cache: 'no-store' });
+        if (!response.ok) return;
+        const detailStates = Array.from(live.querySelectorAll('[data-live-details]'))
+          .map((item) => [item.getAttribute('data-live-details'), item.open]);
+        const descriptionStates = Array.from(live.querySelectorAll('[data-feed-details]'))
+          .map((item) => [item.getAttribute('data-feed-details'), item.open]);
+        const html = await response.text();
+        const fragment = new DOMParser().parseFromString(html, 'text/html');
+        const fresh = fragment.getElementById('subscription-live');
+        if (fresh) {
+          live.innerHTML = fresh.innerHTML;
+          for (const [key, isOpen] of detailStates) {
+            const item = Array.from(live.querySelectorAll('[data-live-details]'))
+              .find((element) => element.getAttribute('data-live-details') === key);
+            if (item) item.open = isOpen;
+          }
+          for (const [key, isOpen] of descriptionStates) {
+            const item = Array.from(live.querySelectorAll('[data-feed-details]'))
+              .find((element) => element.getAttribute('data-feed-details') === key);
+            if (item) item.open = isOpen;
+          }
+        }
+      } catch (_) {}
+    };
+    window.setInterval(refresh, 4000);
+  })();
+  "
+}
+
+pub fn subscription_live_fragment(
+  status: SubscriptionStatus,
+  recent_videos: List(FeedCard),
+  progress: List(Snapshot),
+  library_count: Int,
+) -> Element(a) {
+  div([attribute("id", "subscription-live")], [
+    subscription_status_banner(status),
+    p([class("text-gray-400")], [
+      text(
+        int.to_string(library_count)
+        <> " completed videos in your library. Showing the latest "
+        <> int.to_string(list.length(recent_videos))
+        <> " below.",
+      ),
+    ]),
+    subscription_progress_summary(progress),
     subscription_feed_list(recent_videos),
+  ])
+}
+
+fn subscription_progress_summary(progress: List(Snapshot)) -> Element(a) {
+  case list.is_empty(progress) {
+    True -> div([], [])
+    False -> {
+      let attrs = [
+        class("poll-progress"),
+        attribute("data-live-details", "poll-progress"),
+        attribute("data-default-open", "false"),
+      ]
+      details(attrs, [
+        summary([class("poll-progress-summary")], [
+          span([class("font-semibold")], [text("Live Poll Progress")]),
+          span([class("text-sm text-gray-400")], [
+            text(progress_overview(progress)),
+          ]),
+        ]),
+        phase_progress("Recent uploads", "recent", progress),
+        phase_progress("Backfill check", "backfill", progress),
+      ])
+    }
+  }
+}
+
+fn progress_overview(progress: List(Snapshot)) -> String {
+  let active =
+    list.filter(progress, fn(snapshot) { snapshot.status == "running" })
+  let queued =
+    list.filter(progress, fn(snapshot) { snapshot.status == "queued" })
+  int.to_string(list.length(active))
+  <> " active · "
+  <> int.to_string(list.length(queued))
+  <> " queued"
+}
+
+fn phase_progress(
+  label: String,
+  phase: String,
+  progress: List(Snapshot),
+) -> Element(a) {
+  let snapshots =
+    list.filter(progress, fn(snapshot) { snapshot.phase == phase })
+  case list.is_empty(snapshots) {
+    True -> div([], [])
+    False -> {
+      let total = case list.first(snapshots) {
+        Ok(snapshot) -> snapshot.phase_total
+        Error(_) -> 0
+      }
+      let active =
+        list.filter(snapshots, fn(snapshot) { snapshot.status == "running" })
+      let queued =
+        list.filter(snapshots, fn(snapshot) { snapshot.status == "queued" })
+      let finished =
+        list.filter(snapshots, fn(snapshot) {
+          snapshot.status == "completed"
+          || snapshot.status == "failed"
+          || snapshot.status == "stale"
+        })
+      let failed =
+        list.filter(snapshots, fn(snapshot) {
+          snapshot.status == "failed" || snapshot.status == "stale"
+        })
+      let failed_count = list.length(failed)
+      let percent = case total > 0 {
+        True -> int.clamp(list.length(finished) * 100 / total, 0, 100)
+        False -> 0
+      }
+      div([class("poll-phase")], [
+        div([class("poll-phase-heading")], [
+          span([class("font-semibold")], [text(label)]),
+          span([class("text-sm text-gray-400")], [
+            text(
+              int.to_string(list.length(finished))
+              <> " / "
+              <> int.to_string(total)
+              <> " finished · "
+              <> int.to_string(list.length(active))
+              <> " active"
+              <> " · "
+              <> int.to_string(list.length(queued))
+              <> " queued"
+              <> case failed_count > 0 {
+                True -> " · " <> int.to_string(failed_count) <> " failed/stale"
+                False -> ""
+              },
+            ),
+          ]),
+        ]),
+        div([class("progress-bar")], [
+          div(
+            [
+              class("progress-fill"),
+              attribute("style", "width: " <> int.to_string(percent) <> "%"),
+            ],
+            [],
+          ),
+        ]),
+        case list.is_empty(active) {
+          True -> div([], [])
+          False ->
+            ul(
+              [class("poll-active-list")],
+              list.map(active, active_channel_row),
+            )
+        },
+      ])
+    }
+  }
+}
+
+fn active_channel_row(snapshot: Snapshot) -> Element(a) {
+  let percent_text = case snapshot.percent {
+    Some(value) -> " · " <> int.to_string(value) <> "%"
+    None -> ""
+  }
+  li([class("poll-active-item")], [
+    div([class("poll-active-heading")], [
+      span([class("font-semibold")], [text(snapshot.channel)]),
+      span([class("text-sm text-gray-400")], [
+        text(snapshot.message <> percent_text),
+      ]),
+    ]),
+    case snapshot.percent {
+      Some(value) ->
+        div([class("progress-bar")], [
+          div(
+            [
+              class("progress-fill"),
+              attribute(
+                "style",
+                "width: " <> int.to_string(int.clamp(value, 0, 100)) <> "%",
+              ),
+            ],
+            [],
+          ),
+        ])
+      None -> div([], [])
+    },
   ])
 }
 
 /// Status banner showing current subscription state
 fn subscription_status_banner(status: SubscriptionStatus) -> Element(a) {
   let status_text = case status.enabled, status.is_polling {
-    True, True -> "Polling in progress..."
-    True, False -> "Enabled - Auto-downloading subscriptions"
-    False, _ -> "Disabled - Enable to start auto-downloading"
+    True, True -> "Subscription downloads are running"
+    True, False -> "Automatic downloads are enabled"
+    False, _ -> "Automatic downloads are paused"
   }
-
-  let status_color = case status.enabled {
-    True -> "border-left-color: #16a34a;"
-    False -> "border-left-color: #666;"
+  let status_class = case status.enabled, status.is_polling {
+    True, True -> "subscription-status-dot is-running"
+    True, False -> "subscription-status-dot is-enabled"
+    False, _ -> "subscription-status-dot is-paused"
   }
-
-  div(
-    [
-      class("settings-section"),
-      attribute("style", status_color),
-    ],
-    [
-      div([class("flex justify-between items-center")], [
-        div([], [
-          html.h3([], [text("Status")]),
-          p([class("text-gray-400")], [text(status_text)]),
+  div([class("subscription-status-panel")], [
+    div([class("subscription-status-copy")], [
+      span([class(status_class)], []),
+      div([], [
+        p([class("subscription-status-title")], [text(status_text)]),
+        p([class("subscription-status-meta")], [
           case status.last_poll_at {
-            Some(ts) ->
-              p([class("text-sm text-gray-400 mt-2")], [
-                text("Last poll: " <> format_timestamp(ts)),
-              ])
-            None -> div([], [])
+            Some(ts) -> text("Last checked " <> format_timestamp(ts))
+            None -> text("No poll has run yet")
           },
           case status.last_result {
-            Some(result) -> poll_result_summary(result)
-            None -> div([], [])
+            Some(result) ->
+              case result.errors != [] {
+                True ->
+                  text(
+                    " · "
+                    <> int.to_string(list.length(result.errors))
+                    <> " errors",
+                  )
+                False -> text("")
+              }
+            None -> text("")
           },
         ]),
-        // Manual poll button
-        form(
-          [
-            attribute("action", "/subscriptions/poll"),
-            attribute("method", "POST"),
-          ],
-          [
-            button(
-              [
-                type_("submit"),
-                class("cta-button"),
-                attribute(
-                  "style",
-                  "font-size: 1em; padding: 10px 20px; margin-top: 0;",
-                ),
-              ],
-              [text("Refresh Now")],
-            ),
-          ],
-        ),
       ]),
-    ],
-  )
-}
-
-/// Poll result summary
-fn poll_result_summary(result: PollResult) -> Element(a) {
-  let error_text = case result.errors {
-    [] -> ""
-    errors ->
-      ", "
-      <> int.to_string(list.length(errors))
-      <> " error(s): "
-      <> string.join(errors, "; ")
-  }
-
-  div([class("mt-2 text-sm")], [
-    span([class("text-gray-400")], [
-      text(
-        "Last poll: "
-        <> int.to_string(result.total_found)
-        <> " downloaded"
-        <> error_text,
-      ),
     ]),
+    form(
+      [
+        attribute("action", "/subscriptions/poll"),
+        attribute("method", "POST"),
+        class("status-refresh-form"),
+      ],
+      [
+        button([type_("submit"), class("subscription-refresh-button")], [
+          text("Refresh now"),
+        ]),
+      ],
+    ),
   ])
 }
 
 /// Subscription settings form
-fn subscription_settings_form(config: SubscriptionConfig) -> Element(a) {
+fn subscription_settings_form(
+  config: SubscriptionConfig,
+  settings: Settings,
+) -> Element(a) {
   form(
     [
+      attribute("id", "subscription-settings"),
       attribute("action", "/subscriptions/settings"),
       attribute("method", "POST"),
     ],
     [
       div([class("settings-section")], [
         html.h3([], [text("Subscription Settings")]),
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [
+              text("Maximum upload age (days)"),
+            ]),
+            div([class("setting-description")], [
+              text(
+                "Limits both poll passes to uploads this recent. Set to 0 for unlimited history.",
+              ),
+            ]),
+          ]),
+          input([
+            type_("number"),
+            class("setting-input"),
+            name("days"),
+            attribute("min", "0"),
+            attribute("max", "365"),
+            attribute("value", int.to_string(settings.days)),
+          ]),
+        ]),
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [text("Subscription workers")]),
+            div([class("setting-description")], [
+              text("Maximum simultaneous download workers"),
+            ]),
+          ]),
+          input([
+            type_("number"),
+            class("setting-input"),
+            name("workers"),
+            attribute("min", "1"),
+            attribute("max", "16"),
+            attribute("value", int.to_string(settings.workers)),
+          ]),
+        ]),
+        div([class("setting-row")], [
+          div([], [
+            div([class("setting-label")], [text("Skip restricted videos")]),
+            div([class("setting-description")], [
+              text(
+                "Skip premium-only and channel-members-only uploads. Videos without availability metadata still pass.",
+              ),
+            ]),
+          ]),
+          html.label([class("toggle-switch")], [
+            input([
+              type_("checkbox"),
+              name("skip_restricted"),
+              attribute("value", "true"),
+              case settings.skip_restricted {
+                True -> attribute("checked", "")
+                False -> attribute("data-unchecked", "")
+              },
+            ]),
+            span([class("toggle-slider")], []),
+          ]),
+        ]),
         // Enable toggle
         div([class("setting-row")], [
           div([], [
@@ -1562,9 +1984,12 @@ fn subscription_settings_form(config: SubscriptionConfig) -> Element(a) {
 }
 
 /// Subscription feed list showing recent downloads
-pub fn subscription_feed_list(videos: List(SeenVideo)) -> Element(a) {
-  div([class("settings-section mt-6")], [
-    html.h3([], [text("Recent Downloads")]),
+pub fn subscription_feed_list(videos: List(FeedCard)) -> Element(a) {
+  div([class("feed-section mt-6")], [
+    div([class("feed-section-heading")], [
+      html.h3([], [text("Latest Videos")]),
+      span([class("text-sm text-gray-400")], [text("Newest published first")]),
+    ]),
     case list.is_empty(videos) {
       True ->
         p([class("text-gray-400")], [
@@ -1572,55 +1997,142 @@ pub fn subscription_feed_list(videos: List(SeenVideo)) -> Element(a) {
             "No downloads recorded yet. Enable subscriptions and click Refresh Now to pull the channel list.",
           ),
         ])
-      False -> ul([class("list-none")], list.map(videos, seen_video_card))
+      False ->
+        ul([class("feed-grid list-none")], list.map(videos, seen_video_card))
     },
   ])
 }
 
-/// Individual seen video card
-fn seen_video_card(video: SeenVideo) -> Element(a) {
-  let status_badge_content = case video.downloaded, video.skipped {
-    True, _ ->
-      span([class("status-badge status-completed")], [text("Downloaded")])
-    _, True ->
-      span([class("status-badge status-pending")], [
-        text(option.unwrap(video.skip_reason, "Skipped")),
+/// Individual title-first video card in the YouTube-style grid.
+fn seen_video_card(card: FeedCard) -> Element(a) {
+  let FeedCard(video, plex_url, description, view_count) = card
+  let source_url = video_source_url(video)
+  let primary_url = case plex_url {
+    Some(url) -> Some(url)
+    None -> source_url
+  }
+  let thumbnail = case video.thumbnail_url {
+    Some(url) ->
+      img([
+        attribute("src", url),
+        attribute("alt", "Thumbnail for " <> video.title),
+        class("feed-thumbnail-image"),
+        attribute("loading", "lazy"),
       ])
-    _, _ -> span([class("status-badge status-downloading")], [text("Queued")])
+    None -> div([class("feed-thumbnail-fallback")], [text("No thumbnail")])
+  }
+  let thumbnail_frame =
+    div([class("feed-thumbnail-frame")], [
+      thumbnail,
+      case video.duration_seconds {
+        Some(seconds) ->
+          span([class("feed-duration")], [text(format_duration(seconds))])
+        None -> div([], [])
+      },
+    ])
+  let status_text = case video.downloaded, video.skipped {
+    True, _ -> "Downloaded"
+    _, True -> option.unwrap(video.skip_reason, "Skipped")
+    _, _ -> "Queued"
   }
 
-  let duration_text = case video.duration_seconds {
-    Some(d) -> format_duration(d)
-    None -> "Unknown"
-  }
-
-  li([class("download-card mb-4")], [
-    div([class("flex justify-between items-start")], [
-      div([class("flex-grow")], [
-        p([class("card-title")], [text(truncate_url(video.title, 60))]),
-        p([class("text-sm text-gray-400 mt-1")], [
-          text(option.unwrap(video.channel_name, "Unknown Channel")),
-        ]),
-        div([class("text-sm text-gray-500 mt-2")], [
-          span([], [text("Duration: " <> duration_text)]),
-          span([class("mx-2")], [text("|")]),
-          case string.starts_with(video.url, "http") {
-            True ->
-              a(
-                [
-                  href(video.url),
-                  attribute("target", "_blank"),
-                  class("text-blue-400"),
-                ],
-                [text("View on YouTube")],
-              )
-            False -> span([class("text-gray-500")], [text(video.url)])
-          },
-        ]),
+  li([class("feed-card")], [
+    case primary_url {
+      Some(url) ->
+        a(
+          [
+            href(url),
+            class("feed-primary-link"),
+            attribute("target", "_blank"),
+            attribute("rel", "noopener noreferrer"),
+            attribute("aria-label", "Open " <> video.title),
+          ],
+          [thumbnail_frame],
+        )
+      None -> thumbnail_frame
+    },
+    div([class("feed-card-body")], [
+      h4([class("feed-title")], [
+        case primary_url {
+          Some(url) ->
+            a(
+              [
+                href(url),
+                class("feed-title-link"),
+                attribute("target", "_blank"),
+                attribute("rel", "noopener noreferrer"),
+              ],
+              [text(video.title)],
+            )
+          None -> text(video.title)
+        },
       ]),
-      status_badge_content,
+      p([class("feed-channel")], [
+        text(option.unwrap(video.channel_name, "Unknown Channel")),
+      ]),
+      div([class("feed-meta")], [
+        case view_count {
+          Some(count) if count >= 0 ->
+            span([], [text(format_view_count(count) <> " views")])
+          _ -> div([], [])
+        },
+        case video.published_at {
+          Some(timestamp) -> span([], [text(format_timestamp(timestamp))])
+          None -> div([], [])
+        },
+      ]),
+      case description {
+        Some(body) ->
+          case string.trim(body) {
+            "" -> div([], [])
+            _ ->
+              details(
+                [
+                  class("feed-description"),
+                  attribute("data-feed-details", video.video_id),
+                ],
+                [summary([], [text("Description")]), p([], [text(body)])],
+              )
+          }
+        _ -> div([], [])
+      },
+      div([class("feed-card-actions")], [
+        case plex_url {
+          Some(_) ->
+            case source_url {
+              Some(url) ->
+                a(
+                  [
+                    href(url),
+                    class("feed-source-link"),
+                    attribute("target", "_blank"),
+                    attribute("rel", "noopener noreferrer"),
+                  ],
+                  [text("YouTube ↗")],
+                )
+              None -> div([], [])
+            }
+          None -> div([], [])
+        },
+        span([class("feed-status")], [text(status_text)]),
+      ]),
     ]),
   ])
+}
+
+fn video_source_url(video: SeenVideo) -> Option(String) {
+  case string.starts_with(video.url, "http") {
+    True -> Some(video.url)
+    False ->
+      case string.length(video.video_id) == 11 {
+        True -> Some("https://www.youtube.com/watch?v=" <> video.video_id)
+        False -> None
+      }
+  }
+}
+
+fn format_view_count(count: Int) -> String {
+  int.to_string(count)
 }
 
 /// Format duration as human-readable string
