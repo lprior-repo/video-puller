@@ -16,11 +16,13 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import infra/plex_scan_policy
 import simplifile
 
 /// Ask the configured local Plex server to refresh its video library section.
 pub fn refresh_library() -> Nil {
-  plex_refresh_library()
+  let _ = plex_refresh_library_result(scan_cooldown_ms())
+  Nil
 }
 
 /// Plex scans asynchronously. Revisit titles after scans finish, including
@@ -48,8 +50,10 @@ fn title_sync_loop(library_dir: String, last_error: Option(String)) -> Nil {
       case needs_scan(files, known) {
         False -> None
         True ->
-          case plex_refresh_library_result() {
-            Ok(_) -> None
+          case plex_refresh_library_result(scan_cooldown_ms()) {
+            // Ok includes a shared-gate suppression. Keep any prior error until
+            // a later library read confirms that Plex indexed every file.
+            Ok(_) -> last_error
             Error(message) -> Some(message)
           }
       }
@@ -62,6 +66,15 @@ fn title_sync_loop(library_dir: String, last_error: Option(String)) -> Nil {
     _, _ -> Nil
   }
   title_sync_loop(library_dir, error)
+}
+
+fn scan_cooldown_ms() -> Int {
+  plex_scan_policy.configured_cooldown_ms(
+    case envoy.get("PLEX_SCAN_COOLDOWN_SECONDS") {
+      Ok(value) -> Some(value)
+      Error(_) -> None
+    },
+  )
 }
 
 /// A download completed while Plex was unavailable must trigger a later scan.
@@ -248,11 +261,8 @@ pub fn parse_active_paths_xml(xml: String) -> Result(List(String), String) {
   plex_parse_active_paths(xml)
 }
 
-@external(erlang, "plex_ffi", "refresh_library")
-fn plex_refresh_library() -> Nil
-
 @external(erlang, "plex_ffi", "refresh_library_result")
-fn plex_refresh_library_result() -> Result(Nil, String)
+fn plex_refresh_library_result(cooldown_ms: Int) -> Result(Nil, String)
 
 @external(erlang, "plex_ffi", "library_videos_result")
 fn plex_library_videos_result() -> Result(

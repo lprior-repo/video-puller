@@ -5,6 +5,7 @@
 /// - Running database migrations (INV-002: must run before app start)
 /// - Fixing zombie jobs (INV-003: revert processing jobs to pending)
 import core/channel_reconciler
+import core/plex_scan_exclusion
 import core/storage_guard
 import core/subscription_manager
 import engine/shell
@@ -29,6 +30,7 @@ pub fn initialize() -> Result(Db, DbError) {
     storage_guard.check_volume() |> result.map_error(db.ConnectionError),
   )
   io.println("✅ External storage identity verified")
+  plex_scan_exclusion.configure(ytdl_sub.layout_from_env().root)
   io.println("🧹 Checking persisted downloader ownership records...")
   let recovered_downloaders = shell.recover_orphan_downloads()
   case recovered_downloaders > 0 {

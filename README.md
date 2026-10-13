@@ -81,7 +81,9 @@ The coordinator checks persisted desired state every 30 seconds. A separate
 Gleam loop restores original Plex titles every 30 seconds after asynchronous
 Plex scans finish. It detects completed files missing from Plex and retries
 scanning after Plex becomes available, logging failures and recovery without
-printing credentials. A compact metadata cache avoids repeatedly parsing
+printing credentials. All scan requests share a monotonic five-minute cooldown,
+including startup, completed-download callbacks and failed requests, so a slow
+Plex scanner cannot trigger a new full scan every 30 seconds. A compact metadata cache avoids repeatedly parsing
 large sidecars; it invalidates when the source size or modification time changes.
 
 At startup and before each scheduled poll, rolling retention deletes channel
@@ -157,6 +159,20 @@ For an external drive, set `STORAGE_VOLUME` to its mount path,
 Gleam checks the disk before startup and every five seconds; it stops downloader
 processes if the disk disappears, changes identity, or falls below the reserve.
 Store `DATA_DIR`, `DB_PATH`, `OUTPUT_DIR`, and `TMPDIR` on that external drive.
+When Movies or TV libraries scan the entire volume, opt into
+`PLEX_PARENT_SCAN_EXCLUSION=true`: Gleam adds a rule excluding only `DATA_DIR`
+from those parent scans. Point the dedicated YouTube library directly at
+`DATA_DIR/library`; it remains visible because the ignore file is above its
+library root. Existing ignore rules are preserved and symlinked files refused.
+
+Mount identity and free-space checks do not establish filesystem or SSD health.
+If ordinary directory listings or Plex media reads hang, stop writers and
+preserve download history before checking the disk. An APFS verification reporting
+I/O errors or an invalid fsroot tree requires storage recovery, not repeated
+service restarts. Verify offline after stopping Plex and the puller; keep the
+puller disabled until the filesystem and media reads pass. Back up data before
+repair or replacement. A normal unmount is required; never force-eject to clear
+an active filesystem operation.
 The LaunchAgent starts the Gleam shipment directly; no Python coordinator is
 needed (`ytdl-sub` itself retains its normal Python runtime).
 
@@ -339,6 +355,8 @@ the next poll even while a long first backfill is still running.
 | `MIN_FREE_GB` | Stop downloads when the required volume drops below this free-space reserve | `50` | No |
 | `PLEX_URL` | Optional local Plex server URL | unset | No |
 | `PLEX_SECTION_ID` | Plex library section to refresh and enrich | unset | No |
+| `PLEX_SCAN_COOLDOWN_SECONDS` | Shared minimum spacing between scan attempts, clamped to 30–3600 seconds | `300` | No |
+| `PLEX_PARENT_SCAN_EXCLUSION` | Exclude DATA_DIR from volume-root Plex libraries; dedicated library must use DATA_DIR/library | `false` | No |
 
 The Subscriptions UI saves worker, age and restricted-video settings in
 `${DATA_DIR}/ytdl-sub/runtime.json`; changes apply to the next poll. Older

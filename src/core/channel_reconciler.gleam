@@ -2,6 +2,7 @@
 /// Removed shows are moved on the same disk, retaining their download archive;
 /// adding the show again restores it without downloading the same files twice.
 import core/library_retention
+import core/plex_scan_exclusion
 import core/storage_guard
 import core/watched_retention
 import engine/channel_import
@@ -19,6 +20,7 @@ import simplifile
 
 pub fn reconcile(db: Db, layout: ytdl_sub.Layout) -> Result(Nil, String) {
   use _ <- result.try(storage_guard.check_volume())
+  plex_scan_exclusion.configure(layout.root)
   use _ <- result.try(channel_import.sync_desired(layout.channels_file))
   use channels <- result.try(ytdl_sub.read_channels(layout.channels_file))
   // No retirement is allowed without a valid nonempty desired set.

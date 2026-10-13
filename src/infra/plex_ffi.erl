@@ -2,7 +2,7 @@
 
 -include_lib("xmerl/include/xmerl.hrl").
 
--export([refresh_library/0, refresh_library_result/0, library_videos/0, library_videos_result/0, watched_videos_result/0, update_title/2, parse_videos/1, parse_watched_paths/1, parse_active_paths/1]).
+-export([refresh_library/0, refresh_library_result/1, reserve_scan_gate_at/4, library_videos/0, library_videos_result/0, watched_videos_result/0, update_title/2, parse_videos/1, parse_watched_paths/1, parse_active_paths/1]).
 
 -define(DEFAULT_BASE_URL, "http://127.0.0.1:32400").
 -define(DEFAULT_SECTION_ID, "").
@@ -10,17 +10,47 @@
 %% The Plex token is read only into memory and is never returned to Gleam or
 %% included in an error/log message.
 refresh_library() ->
-    _ = refresh_library_result(),
+    _ = refresh_library_result(300000),
     nil.
 
-refresh_library_result() ->
-    with_token(fun(Token) ->
-        Url = base_url() ++ "/library/sections/" ++ section_id() ++ "/refresh?X-Plex-Token=" ++ quote(Token),
-        case request(get, Url) of
-            {ok, _} -> {ok, nil};
-            _ -> {error, <<"local Plex scan request failed">>}
+refresh_library_result(CooldownMs) ->
+    with_token_result(fun(Token) ->
+        Base = base_url(),
+        Section = section_id(),
+        case reserve_scan_gate(Base, Section, CooldownMs) of
+            {ok, false} -> {ok, nil};
+            {ok, true} ->
+                Url = Base ++ "/library/sections/" ++ Section ++ "/refresh?X-Plex-Token=" ++ quote(Token),
+                case request(get, Url) of
+                    {ok, _} -> {ok, nil};
+                    _ -> {error, <<"local Plex scan request failed">>}
+                end;
+            {error, _} = Error -> Error
         end
     end, {error, <<"Plex credentials or library section unavailable">>}).
+
+%% Reserve the scan window before making the request. The persistent deadline
+%% remains set after request failures, and the token is never part of the key.
+reserve_scan_gate(Base, Section, CooldownMs) ->
+    reserve_scan_gate_at(Base, Section, erlang:monotonic_time(millisecond), CooldownMs).
+
+%% Exposed for deterministic native tests; production uses monotonic time above.
+reserve_scan_gate_at(Base, Section, Now, CooldownMs) ->
+    Key = {?MODULE, refresh_gate, Base, Section},
+    Lock = {Key, self()},
+    Cooldown = max(CooldownMs, 0),
+    case global:trans(Lock, fun() ->
+        case persistent_term:get(Key, undefined) of
+            Until when is_integer(Until), Now < Until -> false;
+            _ ->
+                persistent_term:put(Key, Now + Cooldown),
+                true
+        end
+    end) of
+        true -> {ok, true};
+        false -> {ok, false};
+        aborted -> {error, <<"Plex scan gate unavailable">>}
+    end.
 
 library_videos() ->
     case library_videos_result() of

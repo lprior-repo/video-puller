@@ -1,8 +1,9 @@
 import envoy
-import gleam/option.{None}
+import gleam/option.{None, Some}
 import gleeunit
 import gleeunit/should
 import infra/plex
+import infra/plex_scan_policy
 
 pub fn main() {
   gleeunit.main()
@@ -27,6 +28,18 @@ pub fn completed_download_missing_from_plex_requests_rescan_test() {
   plex.needs_scan(["new.mp4", "old.mp4"], ["old.mp4", "new.mp4", "retired.mp4"])
   |> should.be_false()
   plex.needs_scan([], []) |> should.be_false()
+}
+
+pub fn scan_policy_defaults_and_bounds_configured_cooldown_test() {
+  plex_scan_policy.configured_cooldown_ms(None) |> should.equal(300_000)
+  plex_scan_policy.configured_cooldown_ms(Some("invalid"))
+  |> should.equal(300_000)
+  plex_scan_policy.configured_cooldown_ms(Some("20"))
+  |> should.equal(30_000)
+  plex_scan_policy.configured_cooldown_ms(Some("600"))
+  |> should.equal(600_000)
+  plex_scan_policy.configured_cooldown_ms(Some("9999"))
+  |> should.equal(3_600_000)
 }
 
 pub fn parse_video_xml_extracts_rating_key_path_and_title_test() {
