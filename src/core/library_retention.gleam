@@ -1,5 +1,6 @@
 /// Delete old episodes from live, managed channel libraries while retaining
 /// ytdl-sub archives so future polls do not fetch removed videos again.
+import core/episode_sidecars
 import engine/download_history
 import engine/ytdl_sub
 import gleam/list
@@ -213,11 +214,20 @@ fn delete_episode_files(
   case simplifile.read_directory(season) {
     Error(_) -> Error("cannot read episode directory " <> season)
     Ok(entries) -> {
+      // Include every sibling media name, not just cleanup candidates. A
+      // retained (or symlinked) sibling can own an otherwise matching sidecar.
+      let other_stems =
+        entries
+        |> list.filter(fn(name) {
+          name != media_filename && is_media_file(name)
+        })
+        |> list.map(drop_extension)
       let related =
         list.filter(entries, fn(name) {
           let path = season <> "/" <> name
           let is_episode_file =
-            name == media_filename || related_sidecar(stem, name)
+            name == media_filename
+            || episode_sidecars.owned(stem, name, other_stems)
           is_episode_file && real_file(path)
         })
       let paths = list.map(related, fn(name) { season <> "/" <> name })
@@ -227,29 +237,6 @@ fn delete_episode_files(
       })
     }
   }
-}
-
-fn related_sidecar(stem: String, filename: String) -> Bool {
-  let shares_stem =
-    string.starts_with(filename, stem <> ".")
-    || string.starts_with(filename, stem <> "-")
-  shares_stem
-  && list.any(
-    [
-      ".info.json",
-      ".nfo",
-      ".jpg",
-      ".jpeg",
-      ".png",
-      ".webp",
-      ".srt",
-      ".vtt",
-      ".ass",
-      ".ssa",
-      ".lrc",
-    ],
-    fn(extension) { string.ends_with(filename, extension) },
-  )
 }
 
 fn has_download_archive(show: String) -> Bool {

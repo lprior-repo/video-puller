@@ -1,5 +1,6 @@
 /// Remove completed media Plex reports as watched, while recording a durable
 /// video-ID completion entry before unlinking any owned file.
+import core/episode_sidecars
 import engine/ytdl_sub
 import gleam/list
 import gleam/option.{None, Some}
@@ -143,9 +144,15 @@ fn delete_media_and_sidecars(media_path: String) -> Result(Nil, String) {
   case simplifile.read_directory(parent) {
     Error(_) -> Error("cannot read managed episode directory " <> parent)
     Ok(entries) -> {
+      // Include every sibling media name, not just cleanup candidates. A
+      // retained (or symlinked) sibling can own an otherwise matching sidecar.
+      let other_stems =
+        entries
+        |> list.filter(fn(name) { name != filename && is_media_file(name) })
+        |> list.map(drop_media_extension)
       let companions =
         list.filter(entries, fn(name) {
-          name == filename || exact_sidecar(stem, name)
+          name == filename || episode_sidecars.owned(stem, name, other_stems)
         })
       let paths = list.map(companions, fn(name) { parent <> "/" <> name })
       case list.all(paths, real_file) {
@@ -158,58 +165,6 @@ fn delete_media_and_sidecars(media_path: String) -> Result(Nil, String) {
           })
       }
     }
-  }
-}
-
-fn exact_sidecar(stem: String, filename: String) -> Bool {
-  filename == stem <> ".info.json"
-  || filename == stem <> ".nfo"
-  || list.any(
-    [
-      "-thumb.jpg",
-      "-thumb.jpeg",
-      "-thumb.png",
-      "-thumb.webp",
-      ".jpg",
-      ".jpeg",
-      ".png",
-      ".webp",
-    ],
-    fn(suffix) { filename == stem <> suffix },
-  )
-  || subtitle_sidecar(stem, filename)
-}
-
-fn subtitle_sidecar(stem: String, filename: String) -> Bool {
-  list.any([".srt", ".vtt", ".ass", ".ssa", ".lrc"], fn(extension) {
-    case string.split(filename, stem <> ".") {
-      [prefix, suffix] ->
-        prefix == ""
-        && string.ends_with(suffix, extension)
-        && valid_subtitle_track(string.drop_end(
-          suffix,
-          string.length(extension),
-        ))
-      _ -> False
-    }
-  })
-}
-
-fn valid_subtitle_track(track: String) -> Bool {
-  case string.length(track) > 0 && string.length(track) <= 20 {
-    False -> False
-    True ->
-      list.all(string.to_graphemes(track), fn(char) {
-        case char {
-          "-" -> True
-          _ ->
-            string.length(char) == 1
-            && string.contains(
-              "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-              char,
-            )
-        }
-      })
   }
 }
 

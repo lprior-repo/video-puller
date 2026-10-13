@@ -24,9 +24,12 @@ import simplifile
 
 /// Run the complete startup sequence
 pub fn initialize() -> Result(Db, DbError) {
+  io.println("🔎 Verifying external storage identity...")
   use _ <- result.try(
     storage_guard.check_volume() |> result.map_error(db.ConnectionError),
   )
+  io.println("✅ External storage identity verified")
+  io.println("🧹 Checking persisted downloader ownership records...")
   let recovered_downloaders = shell.recover_orphan_downloads()
   case recovered_downloaders > 0 {
     True ->
@@ -37,6 +40,7 @@ pub fn initialize() -> Result(Db, DbError) {
       )
     False -> Nil
   }
+  io.println("✅ Downloader ownership recovery complete")
   io.println("🚀 Starting FractalVideoEater...")
 
   // Get database path from environment or use default
