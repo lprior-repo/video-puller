@@ -9,7 +9,7 @@ import domain/subscription_types.{
   type SeenVideo, type SubscriptionConfig, type SubscriptionStatus,
 }
 import domain/types.{type VideoJob}
-import engine/subscription_progress.{type Snapshot}
+import engine/subscription_progress.{type Snapshot, Snapshot}
 import engine/subscription_settings.{type Settings}
 import engine/ytdlp
 import gleam/int
@@ -1613,12 +1613,29 @@ pub fn subscription_live_fragment(
         <> " below.",
       ),
     ]),
-    subscription_progress_summary(progress),
+    subscription_progress_summary(progress, status.is_polling),
     subscription_feed_list(recent_videos),
   ])
 }
 
-fn subscription_progress_summary(progress: List(Snapshot)) -> Element(a) {
+fn subscription_progress_summary(
+  progress: List(Snapshot),
+  poll_running: Bool,
+) -> Element(a) {
+  // Progress snapshots survive restarts. When the manager is idle, a saved
+  // running/queued row describes work interrupted by a previous process, not
+  // current activity. Mark those rows stale in this view without changing the
+  // durable snapshot files.
+  let progress = case poll_running {
+    True -> progress
+    False ->
+      list.map(progress, fn(snapshot) {
+        case snapshot.status {
+          "running" | "queued" -> Snapshot(..snapshot, status: "stale")
+          _ -> snapshot
+        }
+      })
+  }
   case list.is_empty(progress) {
     True -> div([], [])
     False -> {
@@ -1631,7 +1648,7 @@ fn subscription_progress_summary(progress: List(Snapshot)) -> Element(a) {
         summary([class("poll-progress-summary")], [
           span([class("font-semibold")], [text("Live Poll Progress")]),
           span([class("text-sm text-gray-400")], [
-            text(progress_overview(progress)),
+            text(progress_overview(progress, poll_running)),
           ]),
         ]),
         phase_progress("Recent uploads", "recent", progress),
@@ -1641,15 +1658,29 @@ fn subscription_progress_summary(progress: List(Snapshot)) -> Element(a) {
   }
 }
 
-fn progress_overview(progress: List(Snapshot)) -> String {
+fn progress_overview(progress: List(Snapshot), poll_running: Bool) -> String {
   let active =
     list.filter(progress, fn(snapshot) { snapshot.status == "running" })
   let queued =
     list.filter(progress, fn(snapshot) { snapshot.status == "queued" })
-  int.to_string(list.length(active))
-  <> " active · "
-  <> int.to_string(list.length(queued))
-  <> " queued"
+  case poll_running {
+    True ->
+      int.to_string(list.length(active))
+      <> " active · "
+      <> int.to_string(list.length(queued))
+      <> " queued"
+    False -> {
+      let interrupted =
+        list.length(
+          list.filter(progress, fn(snapshot) { snapshot.status == "stale" }),
+        )
+      case interrupted > 0 {
+        True ->
+          int.to_string(interrupted) <> " interrupted · poll is not running"
+        False -> "Poll is not running"
+      }
+    }
+  }
 }
 
 fn phase_progress(

@@ -123,6 +123,50 @@ pub fn live_progress_starts_collapsed_beside_compact_status_test() {
   body |> string.contains("1 active · 0 queued") |> should.be_true()
 }
 
+pub fn saved_progress_is_marked_interrupted_when_poll_is_idle_test() {
+  let status =
+    SubscriptionStatus(
+      enabled: False,
+      last_poll_at: Some(1_792_000_000),
+      next_poll_at: None,
+      last_result: None,
+      is_polling: False,
+    )
+  let progress = [
+    Snapshot(
+      key: "recent-running",
+      channel: "Running channel",
+      phase: "recent",
+      status: "running",
+      message: "Downloading",
+      percent: Some(34),
+      phase_total: 8,
+      started_at: 1_792_000_000,
+      updated_at: 1_792_000_010,
+    ),
+    Snapshot(
+      key: "recent-queued",
+      channel: "Queued channel",
+      phase: "recent",
+      status: "queued",
+      message: "Waiting",
+      percent: None,
+      phase_total: 8,
+      started_at: 1_792_000_000,
+      updated_at: 1_792_000_010,
+    ),
+  ]
+  let body =
+    templates.subscription_live_fragment(status, [], progress, 112)
+    |> to_document_string
+
+  body
+  |> string.contains("2 interrupted · poll is not running")
+  |> should.be_true()
+  body |> string.contains("0 active · 2 queued") |> should.be_false()
+  body |> string.contains("2 failed/stale") |> should.be_true()
+}
+
 pub fn subscriptions_page_includes_watched_cleanup_note_and_download_nav_test() {
   let status =
     SubscriptionStatus(
