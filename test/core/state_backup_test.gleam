@@ -11,6 +11,12 @@ pub fn main() {
   gleeunit.main()
 }
 
+pub fn same_day_restart_keeps_next_daily_backup_boundary_test() {
+  state_backup.seconds_until_next_day(2 * 86_400) |> should.equal(86_400)
+  state_backup.seconds_until_next_day(2 * 86_400 + 3600) |> should.equal(82_800)
+  state_backup.seconds_until_next_day(3 * 86_400 - 1) |> should.equal(1)
+}
+
 pub fn vacuum_into_captures_committed_wal_row_and_subscription_files_test() {
   let data_root = temporary_root() <> "/state_backup_wal_data"
   let backup_root = temporary_root() <> "/state_backup_wal_backups"

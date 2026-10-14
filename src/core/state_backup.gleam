@@ -142,7 +142,9 @@ fn backup_loop(database: Db, data_root: String, backup_dir: String) -> Nil {
   let next_delay = case
     run_once(database, data_root, backup_dir, now_seconds())
   {
-    Ok(_) -> daily_seconds
+    // Snapshot folders use UTC days. Sleep to the next day boundary so a
+    // same-day service restart cannot postpone tomorrow's snapshot by 24h.
+    Ok(_) -> seconds_until_next_day(now_seconds())
     Error(message) -> {
       io.println("State backup failed; retrying in one hour: " <> message)
       retry_seconds
@@ -150,6 +152,10 @@ fn backup_loop(database: Db, data_root: String, backup_dir: String) -> Nil {
   }
   process.sleep(next_delay * 1000)
   backup_loop(database, data_root, backup_dir)
+}
+
+pub fn seconds_until_next_day(now_seconds: Int) -> Int {
+  daily_seconds - now_seconds % daily_seconds
 }
 
 fn data_root() -> String {
