@@ -173,6 +173,23 @@ service restarts. Verify offline after stopping Plex and the puller; keep the
 puller disabled until the filesystem and media reads pass. Back up data before
 repair or replacement. A normal unmount is required; never force-eject to clear
 an active filesystem operation.
+
+To move storage, stop the service, back up the database, copy the complete data
+tree (including download-history archives), and verify the copy before switching
+the mount. Run the Gleam relocation command while both separate trees are
+accessible:
+
+```sh
+gleam run -m storage_relocation_cli -- '/old/YouTube' '/new/YouTube'
+```
+
+It updates paths only in the copied database, preserves completed-video IDs and
+scheduler settings, and invalidates generated downloader configs for regeneration.
+Rerunning it is safe. It refuses overlapping roots, symlinked roots or databases,
+and databases that identify the same physical file. Update the service's volume
+UUID and data/output/temp paths and the dedicated Plex library location before
+restarting. Keep the source until file checksums and playback are verified.
+
 The LaunchAgent starts the Gleam shipment directly; no Python coordinator is
 needed (`ytdl-sub` itself retains its normal Python runtime).
 
