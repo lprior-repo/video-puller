@@ -116,6 +116,28 @@ requests found in ordinary channel folders. Cleanup can run below the free-space
 reserve on the UUID-verified external drive; downloads remain blocked until
 the reserve is recovered.
 
+If ordinary age/watched cleanup cannot recover space, low-space cleanup removes
+the oldest completed, date-known regular-channel YouTube episodes first. It
+starts below `MIN_FREE_GB` and aims for an additional 5 GiB of headroom. Explicit
+video requests, unknown dates, unrelated movies, symlinks, active/paused Plex
+sessions, and partially watched episodes are protected. Plex state and drive
+identity are rechecked before each removal; unavailable or malformed Plex state
+blocks this cleanup. Completion IDs are synced before media deletion and remain
+in the download archive. If protected files or other applications still consume
+the reserve, downloads remain stopped. At restart this cleanup runs before
+SQLite is opened, so a full disk need not prevent space recovery.
+
+SQLite starts in WAL mode with `synchronous=FULL`, a five-second busy timeout,
+and a required successful `quick_check`. Corrupt or unreadable databases stop
+startup; the application never silently replaces them with an empty database.
+An optional supervised Gleam worker takes a consistent SQLite `VACUUM INTO`
+snapshot and saves the durable download archive and subscription files to
+`STATE_BACKUP_DIR` daily, retrying failures hourly. It keeps three completed
+daily snapshots and refuses to prune unfamiliar files. The macOS installer
+defaults this directory to `~/Library/Application Support/video-puller/state-backups`
+on the internal drive. These snapshots back up application state, not video
+media; recovery is deliberate rather than silently overwriting a bad database.
+
 The separate native macOS hang watchdog's portable Gleam/Erlang source and
 tests are in `deploy/macos/watchdog`. It validates process ownership and job
 configuration, observes bounded grace/retry/cooldown periods, and lets launchd

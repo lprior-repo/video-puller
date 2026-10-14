@@ -4,6 +4,7 @@
 /// after it, while leaving independent upstream children running.
 import core/managed_trash
 import core/manager
+import core/state_backup
 import core/storage_guard
 import core/subscription_manager.{type SubscriptionMessage}
 import domain/types.{type ManagerMessage, GetStats}
@@ -68,6 +69,7 @@ pub fn start(
   |> static_supervisor.add(subscription_child(db, subscription_name))
   |> static_supervisor.add(server.supervised(db, subscription_subject))
   |> static_supervisor.add(plex_child())
+  |> static_supervisor.add(backup_child(db))
   |> static_supervisor.start
   |> result.map(fn(started) {
     Services(started.data, started.pid, subscription_subject)
@@ -149,6 +151,17 @@ fn start_storage_wrapper() -> actor.StartResult(Nil) {
     Ok(actor.initialised(Nil))
   })
   |> actor.start
+}
+
+fn backup_child(db: Db) -> supervision.ChildSpecification(Nil) {
+  supervision.worker(fn() {
+    actor.new_with_initialiser(15_000, fn(_subject) {
+      state_backup.start(db)
+      Ok(actor.initialised(Nil))
+    })
+    |> actor.start
+  })
+  |> supervision.timeout(ms: 15_000)
 }
 
 fn initialise_download_service(

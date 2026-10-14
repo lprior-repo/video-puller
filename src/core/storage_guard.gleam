@@ -5,13 +5,26 @@ import gleam/erlang/process
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
 pub fn check() -> Result(Nil, String) {
+  use available <- result.try(free_space_kib())
+  let reserve = reserve_kib()
+  case available {
+    None -> Ok(Nil)
+    Some(free) if free >= reserve -> Ok(Nil)
+    Some(_) ->
+      Error("External drive is below the free-space reserve; downloads stopped")
+  }
+}
+
+/// Read space only after verifying the configured volume identity.
+pub fn free_space_kib() -> Result(Option(Int), String) {
   use _ <- result.try(check_volume())
   case envoy.get("STORAGE_VOLUME") {
-    Error(_) | Ok("") -> Ok(Nil)
+    Error(_) | Ok("") -> Ok(None)
     Ok(volume) -> {
       use output <- result.try(command("df", ["-k", volume]))
       let row =
@@ -23,26 +36,28 @@ pub fn check() -> Result(Nil, String) {
         |> result.unwrap("")
       let columns =
         row |> string.split(" ") |> list.filter(fn(value) { value != "" })
-      let reserve =
-        envoy.get("MIN_FREE_GB")
-        |> result.unwrap("50")
-        |> int.parse
-        |> result.unwrap(50)
       case columns {
         [_, _, _, available, ..] -> {
-          let free = int.parse(available) |> result.unwrap(0)
-          case free >= reserve * 1024 * 1024 {
-            True -> Ok(Nil)
-            False ->
-              Error(
-                "External drive is below the free-space reserve; downloads stopped",
-              )
+          case int.parse(available) {
+            Ok(free) if free >= 0 -> Ok(Some(free))
+            _ ->
+              Error("Cannot check external-drive free space; downloads stopped")
           }
         }
         _ -> Error("Cannot check external-drive free space; downloads stopped")
       }
     }
   }
+}
+
+/// Keep the safety reserve positive even for malformed environment settings.
+pub fn reserve_kib() -> Int {
+  envoy.get("MIN_FREE_GB")
+  |> result.unwrap("50")
+  |> int.parse
+  |> result.unwrap(50)
+  |> int.max(1)
+  |> fn(gib) { gib * 1024 * 1024 }
 }
 
 /// Verify identity before cleanup even when the free-space reserve is low.

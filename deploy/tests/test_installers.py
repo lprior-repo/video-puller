@@ -90,7 +90,9 @@ elif name == "sudo":
         "gleam", "export", "erlang-shipment",
     ], args
     commands = [json.loads(line) for line in Path(os.environ["COMMAND_LOG"]).read_text().splitlines()]
-    assert ["chown", "-R", "video-puller:video-puller", os.getcwd()] in commands
+    assert any(command[:3] == ["chown", "-R", "video-puller:video-puller"]
+               and Path(command[3]).resolve() == Path.cwd().resolve()
+               for command in commands if len(command) == 4)
     assert Path("gleam.toml").is_file()
 elif name in ("id", "chown", "systemctl", "gleam"):
     assert os.environ.get("TEST_LINUX") == "1", (name, args)
@@ -189,6 +191,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(plist["ProgramArguments"], [str(self.install / "build/erlang-shipment/entrypoint.sh"), "run"])
         self.assertEqual(plist["EnvironmentVariables"]["DATA_DIR"], str(self.data))
         self.assertEqual(plist["EnvironmentVariables"]["DB_PATH"], str(self.data / "video_eater.db"))
+        self.assertEqual(plist["EnvironmentVariables"]["STATE_BACKUP_DIR"], str(Path(self.env["HOME"]) / "Library/Application Support/video-puller/state-backups"))
         self.assertEqual(plist["StandardOutPath"], str(self.data / "logs/video-puller.log"))
         self.assertIn(["brew", "install", "yt-dlp"], self.commands())
         self.assertIn(["pipx", "install", "ytdl-sub"], self.commands())

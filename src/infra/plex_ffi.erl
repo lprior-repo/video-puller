@@ -2,7 +2,7 @@
 
 -include_lib("xmerl/include/xmerl.hrl").
 
--export([refresh_library/0, refresh_library_result/1, reserve_scan_gate_at/4, library_videos/0, library_videos_result/0, watched_videos_result/0, managed_section_inventory_result/0, empty_section_trash_result/0, reserve_trash_gate_at/4, parse_managed_section/2, parse_section_paths/1, update_title/2, parse_videos/1, parse_watched_paths/1, parse_active_paths/1]).
+-export([refresh_library/0, refresh_library_result/1, reserve_scan_gate_at/4, library_videos/0, library_videos_result/0, watched_videos_result/0, cleanup_protected_paths_result/0, managed_section_inventory_result/0, empty_section_trash_result/0, reserve_trash_gate_at/4, parse_managed_section/2, parse_section_paths/1, update_title/2, parse_videos/1, parse_watched_paths/1, parse_active_paths/1, parse_partial_watched_paths/1]).
 
 -define(DEFAULT_BASE_URL, "http://127.0.0.1:32400").
 -define(DEFAULT_SECTION_ID, "").
@@ -77,7 +77,7 @@ watched_videos_result() ->
         SessionsUrl = base_url() ++ "/status/sessions?X-Plex-Token=" ++ quote(Token),
         case {request(get, LibraryUrl), request(get, SessionsUrl)} of
             {{ok, LibraryBody}, {ok, SessionsBody}} ->
-                case {parse_watched_paths_result(LibraryBody), parse_active_paths_result(SessionsBody)} of
+                case {parse_watched_paths_result(LibraryBody), parse_protected_active_paths_result(SessionsBody)} of
                     {{ok, WatchedPaths}, {ok, ActivePaths}} ->
                         {ok, {true, {WatchedPaths, ActivePaths}}};
                     _ -> {error, <<"local Plex response could not be parsed">>}
@@ -85,6 +85,28 @@ watched_videos_result() ->
             _ -> {error, <<"local Plex server unavailable">>}
         end
     end, {ok, {false, {[], []}}}).
+
+%% Fail closed unless the section response is complete and every candidate and
+%% active session Part has a usable filepath. The token remains local to FFI.
+cleanup_protected_paths_result() ->
+    with_token_result(fun(Token) ->
+        Base = base_url(),
+        Section = section_id(),
+        LibraryUrl = Base ++ "/library/sections/" ++ Section ++
+            "/all?type=4&X-Plex-Container-Start=0&X-Plex-Container-Size=100000&X-Plex-Token=" ++ quote(Token),
+        SessionsUrl = Base ++ "/status/sessions?X-Plex-Token=" ++ quote(Token),
+        case {request(get, LibraryUrl), request(get, SessionsUrl)} of
+            {{ok, LibraryBody}, {ok, SessionsBody}} ->
+                case {parse_section_paths(LibraryBody),
+                        parse_partial_watched_paths_result(LibraryBody),
+                        parse_protected_active_paths_result(SessionsBody)} of
+                    {{ok, _AllPaths}, {ok, PartialPaths}, {ok, ActivePaths}} ->
+                        {ok, {true, lists:usort(PartialPaths ++ ActivePaths)}};
+                    _ -> {error, <<"local Plex response could not be parsed">>}
+                end;
+            _ -> {error, <<"local Plex server unavailable">>}
+        end
+    end, {ok, {false, []}}).
 
 %% Return strict inventory for the configured section. No path or scanner
 %% defaults are inferred: malformed or incomplete responses fail closed.
@@ -312,24 +334,76 @@ parse_watched_paths_result(Body) ->
     end.
 
 parse_active_paths(Body) ->
-    case parse_active_paths_result(Body) of
+    case parse_protected_active_paths_result(Body) of
         {ok, Paths} -> {ok, Paths};
         error -> {error, <<"invalid Plex sessions XML">>}
     end.
 
-parse_active_paths_result(Body) ->
+parse_partial_watched_paths(Body) ->
+    case parse_partial_watched_paths_result(Body) of
+        {ok, Paths} -> {ok, Paths};
+        error -> {error, <<"invalid or incomplete Plex section XML">>}
+    end.
+
+parse_partial_watched_paths_result(Body) ->
+    try
+        {Xml, _} = xmerl_scan:string(binary_to_list(Body), [{quiet, true}, {encoding, "utf-8"}]),
+        case Xml of
+            #xmlElement{name = 'MediaContainer'} ->
+                Videos = xmerl_xpath:string("//Video", Xml),
+                case complete_container(Xml, Videos) of
+                    false -> error;
+                    true ->
+                        case lists:foldl(fun
+                            (#xmlElement{} = Video, {ok, Paths}) ->
+                                Attrs = attrs(Video#xmlElement.attributes),
+                                %% Plex omits both fields for an unwatched item.
+                                case {strict_integer(maps:get("viewCount", Attrs, "0")),
+                                        strict_integer(maps:get("viewOffset", Attrs, "0")),
+                                        video_part_paths(Video)} of
+                                    {{ok, 0}, {ok, Offset}, PartPaths} when Offset > 0, PartPaths =/= error ->
+                                        {ok, PartPaths ++ Paths};
+                                    {{ok, Count}, {ok, Offset}, PartPaths}
+                                            when Count >= 0, Offset >= 0, PartPaths =/= error ->
+                                        {ok, Paths};
+                                    _ -> error
+                                end;
+                            (_, error) -> error
+                        end, {ok, []}, Videos) of
+                            {ok, Paths} -> {ok, lists:usort([unicode:characters_to_binary(Path) || Path <- Paths])};
+                            error -> error
+                        end
+                end;
+            _ -> error
+        end
+    catch
+        _:_ -> error
+    end.
+
+strict_integer(Value) when is_list(Value) ->
+    case string:to_integer(Value) of
+        {Integer, []} -> {ok, Integer};
+        _ -> error
+    end;
+strict_integer(_) -> error.
+
+parse_protected_active_paths_result(Body) ->
     try
         {Xml, _} = xmerl_scan:string(binary_to_list(Body), [{quiet, true}, {encoding, "utf-8"}]),
         case Xml of
             #xmlElement{name = 'MediaContainer'} ->
                 Parts = xmerl_xpath:string("//Part", Xml),
-                {ok, lists:usort(lists:filtermap(fun(Part) ->
-                    Attrs = attrs(Part#xmlElement.attributes),
-                    case maps:get("file", Attrs, "") of
-                        [] -> false;
-                        Path -> {true, unicode:characters_to_binary(Path)}
-                    end
-                end, Parts))};
+                Videos = xmerl_xpath:string("//Video", Xml),
+                case lists:all(fun(Video) -> video_part_paths(Video) =/= error end, Videos)
+                  andalso lists:all(fun
+                    (#xmlElement{attributes = Attributes}) -> maps:get("file", attrs(Attributes), "") =/= [];
+                    (_) -> false
+                end, Parts) of
+                    true ->
+                        {ok, lists:usort([unicode:characters_to_binary(maps:get("file", attrs(Part#xmlElement.attributes))) ||
+                            #xmlElement{} = Part <- Parts])};
+                    false -> error
+                end;
             _ -> error
         end
     catch

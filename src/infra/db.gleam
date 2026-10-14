@@ -6,6 +6,7 @@ import cake.{type ReadQuery, type WriteQuery}
 import cake/adapter/sqlite
 import gleam/dynamic/decode
 import gleam/result
+import gleam/string
 import sqlight
 
 /// Database connection type
@@ -39,17 +40,42 @@ pub fn close(conn: Db) -> Result(Nil, DbError) {
   })
 }
 
-/// Initialize a database with WAL mode enabled
+/// Initialize a database with durable writes and bounded lock waiting.
 pub fn init_db(path: String) -> Result(Db, DbError) {
   use conn <- result.try(connect(path))
-
-  // Enable WAL mode for better concurrency
-  case exec_raw(conn, "PRAGMA journal_mode=WAL;") {
-    Ok(_) -> Ok(conn)
-    Error(e) -> {
+  case configure_connection(conn) {
+    Ok(Nil) -> Ok(conn)
+    Error(error) -> {
       let _ = close(conn)
-      Error(e)
+      Error(error)
     }
+  }
+}
+
+fn configure_connection(conn: Db) -> Result(Nil, DbError) {
+  use _ <- result.try(exec_raw(conn, "PRAGMA journal_mode=WAL;"))
+  use _ <- result.try(exec_raw(conn, "PRAGMA synchronous=FULL;"))
+  use _ <- result.try(exec_raw(conn, "PRAGMA busy_timeout=5000;"))
+
+  // quick_check returns one "ok" row only when SQLite finds no database
+  // integrity problems. Do not let the application start on a bad database.
+  use checks <- result.try(
+    sqlight.query(
+      "PRAGMA quick_check;",
+      conn,
+      [],
+      decode.at([0], decode.string),
+    )
+    |> result.map_error(fn(err) {
+      QueryError("Database quick_check failed: " <> sqlight_error(err))
+    }),
+  )
+  case checks {
+    ["ok"] -> Ok(Nil)
+    _ ->
+      Error(QueryError(
+        "Database quick_check reported: " <> string.join(checks, ", "),
+      ))
   }
 }
 

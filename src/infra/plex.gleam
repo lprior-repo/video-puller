@@ -281,6 +281,16 @@ pub fn watched_video_paths_result() -> Result(Option(List(String)), String) {
   }
 }
 
+/// Return every file Plex must protect from low-space cleanup: active session
+/// parts and partially watched episode parts. None means Plex is unconfigured.
+pub fn cleanup_protected_paths_result() -> Result(Option(List(String)), String) {
+  case plex_cleanup_protected_paths_result() {
+    Ok(#(False, _)) -> Ok(None)
+    Ok(#(True, paths)) -> Ok(Some(paths))
+    Error(message) -> Error(message)
+  }
+}
+
 /// Keep media being watched in Plex out of any cleanup candidate set.
 pub fn exclude_active_paths(
   watched: List(String),
@@ -298,6 +308,14 @@ pub fn parse_watched_paths_xml(xml: String) -> List(String) {
 /// an error so watched cleanup can fail closed instead of deleting a rewatched file.
 pub fn parse_active_paths_xml(xml: String) -> Result(List(String), String) {
   plex_parse_active_paths(xml)
+}
+
+/// Parse all Part paths for episodes with viewOffset > 0 and viewCount = 0.
+/// Invalid or incomplete section XML fails closed.
+pub fn parse_partial_watched_paths_xml(
+  xml: String,
+) -> Result(List(String), String) {
+  plex_parse_partial_watched_paths(xml)
 }
 
 @external(erlang, "plex_ffi", "refresh_library_result")
@@ -321,6 +339,12 @@ fn plex_watched_videos_result() -> Result(
   String,
 )
 
+@external(erlang, "plex_ffi", "cleanup_protected_paths_result")
+fn plex_cleanup_protected_paths_result() -> Result(
+  #(Bool, List(String)),
+  String,
+)
+
 @external(erlang, "plex_ffi", "update_title")
 fn plex_update_title(rating_key: String, title: String) -> Nil
 
@@ -341,6 +365,9 @@ fn plex_parse_watched_paths(xml: String) -> List(String)
 
 @external(erlang, "plex_ffi", "parse_active_paths")
 fn plex_parse_active_paths(xml: String) -> Result(List(String), String)
+
+@external(erlang, "plex_ffi", "parse_partial_watched_paths")
+fn plex_parse_partial_watched_paths(xml: String) -> Result(List(String), String)
 
 type UniqueOption {
   Positive

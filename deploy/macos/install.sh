@@ -22,6 +22,7 @@ POLL_ON_START="${POLL_ON_START:-true}"
 STORAGE_VOLUME="${STORAGE_VOLUME:-}"
 STORAGE_VOLUME_UUID="${STORAGE_VOLUME_UUID:-}"
 MIN_FREE_GB="${MIN_FREE_GB:-50}"
+STATE_BACKUP_DIR="${STATE_BACKUP_DIR:-$HOME/Library/Application Support/video-puller/state-backups}"
 PLEX_URL="${PLEX_URL:-http://127.0.0.1:32400}"
 PLEX_SECTION_ID="${PLEX_SECTION_ID:-}"
 PLEX_MANAGED_TRASH_CLEANUP="${PLEX_MANAGED_TRASH_CLEANUP:-false}"
@@ -184,6 +185,8 @@ cat > "$TEMP_PLIST" <<PLIST
     <string>$(xml_escape "$SUBSCRIPTION_DAYS")</string>
     <key>MIN_FREE_GB</key>
     <string>$(xml_escape "$MIN_FREE_GB")</string>
+    <key>STATE_BACKUP_DIR</key>
+    <string>$(xml_escape "$STATE_BACKUP_DIR")</string>
     <key>STORAGE_VOLUME</key>
     <string>$(xml_escape "$STORAGE_VOLUME")</string>
     <key>STORAGE_VOLUME_UUID</key>

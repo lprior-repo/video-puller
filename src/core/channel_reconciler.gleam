@@ -3,6 +3,7 @@
 /// adding the show again restores it without downloading the same files twice.
 import core/library_retention
 import core/plex_scan_exclusion
+import core/pressure_retention
 import core/storage_guard
 import core/watched_retention
 import engine/channel_import
@@ -58,6 +59,14 @@ pub fn reconcile(db: Db, layout: ytdl_sub.Layout) -> Result(Nil, String) {
               )
           }
         Error(error) -> io.println("Watched cleanup will retry: " <> error)
+      }
+      use evicted <- result.try(pressure_retention.cleanup(layout))
+      case evicted {
+        [] -> Nil
+        ids ->
+          io.println(
+            "Low-space videos removed: " <> string.inspect(list.length(ids)),
+          )
       }
       let live_ids =
         ytdl_sub.list_library_media(layout.library_dir)

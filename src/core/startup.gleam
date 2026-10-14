@@ -6,6 +6,7 @@
 /// - Fixing zombie jobs (INV-003: revert processing jobs to pending)
 import core/channel_reconciler
 import core/plex_scan_exclusion
+import core/pressure_retention
 import core/storage_guard
 import core/subscription_manager
 import engine/shell
@@ -43,6 +44,20 @@ pub fn initialize() -> Result(Db, DbError) {
     False -> Nil
   }
   io.println("✅ Downloader ownership recovery complete")
+  // A full disk can prevent SQLite opening its WAL; recover media space before
+  // opening the database, without ever bypassing durable download history.
+  use recovered <- result.try(
+    pressure_retention.cleanup(ytdl_sub.layout_from_env())
+    |> result.map_error(db.ConnectionError),
+  )
+  case recovered {
+    [] -> Nil
+    ids ->
+      io.println(
+        "Low-space videos removed before database startup: "
+        <> int.to_string(list.length(ids)),
+      )
+  }
   io.println("🚀 Starting FractalVideoEater...")
 
   // Get database path from environment or use default
