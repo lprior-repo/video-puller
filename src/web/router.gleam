@@ -45,6 +45,7 @@ fn route(req: Request, ctx: Context) -> Response {
     // Subscriptions page
     http.Get, ["subscriptions"] -> handlers.subscriptions(req, ctx)
     http.Get, ["subscriptions", "live"] -> handlers.subscriptions_live(req, ctx)
+    http.Get, ["subscriptions", "feed"] -> handlers.subscriptions_feed(req, ctx)
     http.Post, ["subscriptions", "channels"] ->
       handlers.import_subscription_channels(req, ctx)
     http.Post, ["subscriptions", "channels", "add"] ->

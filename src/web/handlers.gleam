@@ -785,24 +785,6 @@ fn get_timestamp() -> Int {
 /// Subscriptions page handler - shows subscription settings and recent videos
 pub fn subscriptions(_req: Request, ctx: Context) -> Response {
   let layout = ytdl_sub.layout_from_env()
-  // Keep the database feed aligned with files already committed by ytdl-sub,
-  // including files from a poll that is still running.
-  let #(_recorded, failed) =
-    subscription_manager.reconcile_library(
-      ctx.db,
-      layout.library_dir,
-      get_timestamp(),
-    )
-  case failed > 0 {
-    True ->
-      io.println(
-        "Subscription library reconciliation could not record "
-        <> int.to_string(failed)
-        <> " files",
-      )
-    False -> Nil
-  }
-
   // Load subscription config
   let config = case subscription_repo.get_config(ctx.db) {
     Ok(c) -> c
@@ -812,50 +794,52 @@ pub fn subscriptions(_req: Request, ctx: Context) -> Response {
   // Get subscription status if manager is available
   let status = get_subscription_status(ctx)
 
-  // Load recent seen videos
-  let recent_videos = case
-    subscription_repo.list_downloaded_videos(ctx.db, 200)
-  {
-    Ok(videos) -> list.map(videos, enrich_seen_video)
-    Error(_) -> []
-  }
-
   templates.layout(
     "Subscriptions",
     templates.subscriptions_page(
       config,
       status,
-      library_feed.cards(layout, recent_videos),
       layout.library_dir,
       subscription_settings.load(),
       get_ytdlp_version(),
       plex_library_url(),
       subscription_progress.read_snapshots(layout.root),
       subscription_repo.count_downloaded(ctx.db)
-        |> result.unwrap(list.length(recent_videos)),
+        |> result.unwrap(0),
     ),
   )
   |> html_response(200, _)
 }
 
-/// Small live fragment polled by the subscriptions page without rescanning the
-/// library or replacing the editable settings form.
+/// Small live status fragment; it deliberately performs no library or metadata
+/// traversal and does not replace the independently loaded video grid.
 pub fn subscriptions_live(_req: Request, ctx: Context) -> Response {
   let layout = ytdl_sub.layout_from_env()
-  let root = layout.root
   let status = get_subscription_status(ctx)
-  let recent_videos = case
-    subscription_repo.list_downloaded_videos(ctx.db, 200)
-  {
+  templates.subscription_live_fragment(
+    status,
+    subscription_progress.read_snapshots(layout.root),
+    subscription_repo.count_downloaded(ctx.db)
+      |> result.unwrap(0),
+  )
+  |> to_document_string
+  |> html_response(200, _)
+}
+
+/// Rich video grid endpoint loaded outside the page's navigation response and
+/// refreshed only when the completed-video count changes.
+pub fn subscriptions_feed(_req: Request, ctx: Context) -> Response {
+  let layout = ytdl_sub.layout_from_env()
+  let videos = case subscription_repo.list_downloaded_videos(ctx.db, 200) {
     Ok(videos) -> list.map(videos, enrich_seen_video)
     Error(_) -> []
   }
-  templates.subscription_live_fragment(
-    status,
-    library_feed.cards(layout, recent_videos),
-    subscription_progress.read_snapshots(root),
+  let library_count =
     subscription_repo.count_downloaded(ctx.db)
-      |> result.unwrap(list.length(recent_videos)),
+    |> result.unwrap(list.length(videos))
+  templates.subscription_feed_fragment(
+    library_feed.cards(layout, videos),
+    library_count,
   )
   |> to_document_string
   |> html_response(200, _)

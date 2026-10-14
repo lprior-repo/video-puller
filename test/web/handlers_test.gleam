@@ -511,7 +511,9 @@ pub fn subscriptions_renders_config_form_test() {
   body |> string.contains("name=\"days\"") |> should.be_true()
   body |> string.contains("name=\"workers\"") |> should.be_true()
   body |> string.contains("id=\"subscription-live\"") |> should.be_true()
-  body |> string.contains("setInterval(refresh, 4000)") |> should.be_true()
+  body |> string.contains("setInterval(refreshLive, 4000)") |> should.be_true()
+  body |> string.contains("fetch('/subscriptions/feed'") |> should.be_true()
+  body |> string.contains("let liveInFlight = false") |> should.be_true()
   body
   |> string.contains("action=\"/subscriptions/channels\"")
   |> should.be_true()
@@ -548,7 +550,10 @@ pub fn subscriptions_feed_uses_video_title_test() {
   let _ = subscription_repo.mark_seen(conn, video, True, None, None, 1000)
 
   let response =
-    handlers.subscriptions(simulate.request(http.Get, "/subscriptions"), ctx)
+    handlers.subscriptions_feed(
+      simulate.request(http.Get, "/subscriptions/feed"),
+      ctx,
+    )
   let body = simulate.read_body(response)
 
   response.status |> should.equal(200)
@@ -612,7 +617,7 @@ pub fn subscriptions_progress_shows_phase_totals_and_active_downloads_test() {
       is_polling: True,
     )
   let html =
-    templates.subscription_live_fragment(status, [], progress, 63)
+    templates.subscription_live_fragment(status, progress, 63)
     |> to_document_string
 
   html |> string.contains("1 / 2 finished") |> should.be_true()

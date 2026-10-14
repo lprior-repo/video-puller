@@ -110,7 +110,7 @@ pub fn live_progress_starts_collapsed_beside_compact_status_test() {
     ),
   ]
   let body =
-    templates.subscription_live_fragment(status, [], progress, 112)
+    templates.subscription_live_fragment(status, progress, 112)
     |> to_document_string
 
   body
@@ -157,7 +157,7 @@ pub fn saved_progress_is_marked_interrupted_when_poll_is_idle_test() {
     ),
   ]
   let body =
-    templates.subscription_live_fragment(status, [], progress, 112)
+    templates.subscription_live_fragment(status, progress, 112)
     |> to_document_string
 
   body
@@ -165,6 +165,48 @@ pub fn saved_progress_is_marked_interrupted_when_poll_is_idle_test() {
   |> should.be_true()
   body |> string.contains("0 active · 2 queued") |> should.be_false()
   body |> string.contains("2 failed/stale") |> should.be_true()
+}
+
+pub fn live_fragment_is_compact_and_feed_loads_separately_test() {
+  let video =
+    SeenVideo(
+      video_id: "dQw4w9WgXcQ",
+      channel_id: None,
+      channel_name: Some("Sample Channel"),
+      title: "Video title",
+      url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      published_at: Some(1_792_000_000),
+      duration_seconds: Some(83),
+      thumbnail_url: Some("https://example.com/thumb.jpg"),
+      first_seen_at: 1_792_000_000,
+      downloaded: True,
+      skipped: False,
+      skip_reason: None,
+      job_id: None,
+    )
+  let status =
+    SubscriptionStatus(
+      enabled: False,
+      last_poll_at: None,
+      next_poll_at: None,
+      last_result: None,
+      is_polling: False,
+    )
+  let live =
+    templates.subscription_live_fragment(status, [], 1) |> to_document_string
+  let feed =
+    templates.subscription_feed_fragment(
+      [FeedCard(video, None, Some("Long description"), None)],
+      1,
+    )
+    |> to_document_string
+
+  live |> string.contains("data-completed-count=\"1\"") |> should.be_true()
+  live |> string.contains("Video title") |> should.be_false()
+  live |> string.contains("Long description") |> should.be_false()
+  feed |> string.contains("Video title") |> should.be_true()
+  feed |> string.contains("Long description") |> should.be_true()
+  feed |> string.contains("data-completed-count=\"1\"") |> should.be_true()
 }
 
 pub fn subscriptions_page_includes_watched_cleanup_note_and_download_nav_test() {
@@ -180,7 +222,6 @@ pub fn subscriptions_page_includes_watched_cleanup_note_and_download_nav_test() 
     templates.subscriptions_page(
       default_config(),
       status,
-      [],
       "/library",
       Settings(workers: 8, days: 30, skip_restricted: True),
       "2026.10.1",

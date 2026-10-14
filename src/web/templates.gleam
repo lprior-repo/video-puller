@@ -1383,7 +1383,6 @@ pub type FeedCard {
 pub fn subscriptions_page(
   config: SubscriptionConfig,
   status: SubscriptionStatus,
-  recent_videos: List(FeedCard),
   library_dir: String,
   settings: Settings,
   ytdlp_version: String,
@@ -1446,8 +1445,9 @@ pub fn subscriptions_page(
         ]),
       ],
     ),
-    // Status and feed refresh independently so unsaved controls survive polling.
-    subscription_live_fragment(status, recent_videos, progress, library_count),
+    // Status stays lightweight; the rich media grid loads independently.
+    subscription_live_fragment(status, progress, library_count),
+    subscription_feed_placeholder(library_count),
     div([class("watched-cleanup-note")], [
       p([], [
         text(
@@ -1565,57 +1565,118 @@ fn subscription_live_refresh_script() -> String {
   "
   (function(){
     const live = document.getElementById('subscription-live');
-    if (!live) return;
-    const refresh = async () => {
+    let feed = document.getElementById('subscription-feed');
+    if (!live || !feed) return;
+    let liveInFlight = false;
+    let feedInFlight = false;
+    let feedUpdatedAt = 0;
+    const preserveOpenDetails = (root, selector, attributeName) => Array.from(root.querySelectorAll(selector))
+      .filter((item) => item.open)
+      .map((item) => item.getAttribute(attributeName));
+    const restoreOpenDetails = (root, selector, attributeName, keys) => {
+      for (const item of root.querySelectorAll(selector)) {
+        if (keys.includes(item.getAttribute(attributeName))) item.open = true;
+      }
+    };
+    const refreshFeed = async () => {
+      if (feedInFlight) return;
+      feedInFlight = true;
+      try {
+        const response = await fetch('/subscriptions/feed', { headers: { 'Accept': 'text/html' }, cache: 'no-store' });
+        if (!response.ok) return;
+        const html = await response.text();
+        const fragment = new DOMParser().parseFromString(html, 'text/html');
+        const fresh = fragment.getElementById('subscription-feed');
+        if (fresh) {
+          const openDescriptions = preserveOpenDetails(feed, '[data-feed-details]', 'data-feed-details');
+          feed.replaceWith(fresh);
+          feed = fresh;
+          feedUpdatedAt = Date.now();
+          restoreOpenDetails(feed, '[data-feed-details]', 'data-feed-details', openDescriptions);
+        }
+      } catch (_) {
+      } finally {
+        feedInFlight = false;
+      }
+    };
+    const refreshLive = async () => {
+      if (liveInFlight) return;
+      liveInFlight = true;
       try {
         const response = await fetch('/subscriptions/live', { headers: { 'Accept': 'text/html' }, cache: 'no-store' });
         if (!response.ok) return;
-        const detailStates = Array.from(live.querySelectorAll('[data-live-details]'))
-          .map((item) => [item.getAttribute('data-live-details'), item.open]);
-        const descriptionStates = Array.from(live.querySelectorAll('[data-feed-details]'))
-          .map((item) => [item.getAttribute('data-feed-details'), item.open]);
         const html = await response.text();
         const fragment = new DOMParser().parseFromString(html, 'text/html');
         const fresh = fragment.getElementById('subscription-live');
         if (fresh) {
+          const openDetails = preserveOpenDetails(live, '[data-live-details]', 'data-live-details');
           live.innerHTML = fresh.innerHTML;
-          for (const [key, isOpen] of detailStates) {
-            const item = Array.from(live.querySelectorAll('[data-live-details]'))
-              .find((element) => element.getAttribute('data-live-details') === key);
-            if (item) item.open = isOpen;
-          }
-          for (const [key, isOpen] of descriptionStates) {
-            const item = Array.from(live.querySelectorAll('[data-feed-details]'))
-              .find((element) => element.getAttribute('data-feed-details') === key);
-            if (item) item.open = isOpen;
-          }
+          live.setAttribute('data-completed-count', fresh.getAttribute('data-completed-count') || '0');
+          restoreOpenDetails(live, '[data-live-details]', 'data-live-details', openDetails);
+          const freshCount = live.getAttribute('data-completed-count');
+          if (freshCount !== feed.getAttribute('data-completed-count')
+              || feed.getAttribute('data-feed-loaded') !== 'true'
+              || Date.now() - feedUpdatedAt >= 60000) refreshFeed();
         }
-      } catch (_) {}
+      } catch (_) {
+      } finally {
+        liveInFlight = false;
+      }
     };
-    window.setInterval(refresh, 4000);
+    refreshFeed();
+    window.setInterval(refreshLive, 4000);
   })();
   "
 }
 
 pub fn subscription_live_fragment(
   status: SubscriptionStatus,
-  recent_videos: List(FeedCard),
   progress: List(Snapshot),
   library_count: Int,
 ) -> Element(a) {
-  div([attribute("id", "subscription-live")], [
-    subscription_status_banner(status),
-    p([class("text-gray-400")], [
-      text(
-        int.to_string(library_count)
-        <> " completed videos in your library. Showing the latest "
-        <> int.to_string(list.length(recent_videos))
-        <> " below.",
-      ),
-    ]),
-    subscription_progress_summary(progress, status.is_polling),
-    subscription_feed_list(recent_videos),
-  ])
+  div(
+    [
+      attribute("id", "subscription-live"),
+      attribute("data-completed-count", int.to_string(library_count)),
+    ],
+    [
+      subscription_status_banner(status),
+      p([class("text-gray-400")], [
+        text(
+          int.to_string(library_count) <> " completed videos in your library.",
+        ),
+      ]),
+      subscription_progress_summary(progress, status.is_polling),
+    ],
+  )
+}
+
+/// Compact shell for the rich feed, loaded separately so metadata and library
+/// traversal cannot delay navigation or the four-second status refresh.
+fn subscription_feed_placeholder(library_count: Int) -> Element(a) {
+  div(
+    [
+      attribute("id", "subscription-feed"),
+      attribute("data-completed-count", int.to_string(library_count)),
+      attribute("data-feed-loaded", "false"),
+    ],
+    [p([class("text-gray-400")], [text("Loading latest videos…")])],
+  )
+}
+
+/// Rich feed response, refreshed only when the completed-video count changes.
+pub fn subscription_feed_fragment(
+  videos: List(FeedCard),
+  library_count: Int,
+) -> Element(a) {
+  div(
+    [
+      attribute("id", "subscription-feed"),
+      attribute("data-completed-count", int.to_string(library_count)),
+      attribute("data-feed-loaded", "true"),
+    ],
+    [subscription_feed_list(videos)],
+  )
 }
 
 fn subscription_progress_summary(

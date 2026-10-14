@@ -129,6 +129,9 @@ and unknown availability; extraction-time restrictions may still be reported.
 The subscription grid uses original thumbnails, titles, channel/date/duration,
 saved descriptions and view counts, with direct links to each indexed Plex
 episode. View counts reflect the saved metadata, not a live YouTube counter.
+The page loads the rich video grid separately from its four-second status and
+progress refresh. Grid requests never overlap and refresh after new completions
+or once per minute to pick up later Plex links and metadata updates.
 
 The application runs under an OTP `RestForOne` supervisor, ordered as storage
 guard, download manager and pool, named subscription actor, Mist HTTP
