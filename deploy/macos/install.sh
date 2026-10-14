@@ -24,6 +24,7 @@ STORAGE_VOLUME_UUID="${STORAGE_VOLUME_UUID:-}"
 MIN_FREE_GB="${MIN_FREE_GB:-50}"
 PLEX_URL="${PLEX_URL:-http://127.0.0.1:32400}"
 PLEX_SECTION_ID="${PLEX_SECTION_ID:-}"
+PLEX_MANAGED_TRASH_CLEANUP="${PLEX_MANAGED_TRASH_CLEANUP:-false}"
 PLEX_MACHINE_ID="${PLEX_MACHINE_ID:-}"
 PLIST_DIR="${PLIST_DIR:-$HOME/Library/LaunchAgents}"
 LABEL="local.video-puller"
@@ -191,6 +192,8 @@ cat > "$TEMP_PLIST" <<PLIST
     <string>$(xml_escape "$PLEX_URL")</string>
     <key>PLEX_SECTION_ID</key>
     <string>$(xml_escape "$PLEX_SECTION_ID")</string>
+    <key>PLEX_MANAGED_TRASH_CLEANUP</key>
+    <string>$(xml_escape "$PLEX_MANAGED_TRASH_CLEANUP")</string>
     <key>PLEX_MACHINE_ID</key>
     <string>$(xml_escape "$PLEX_MACHINE_ID")</string>
     <key>OUTPUT_DIR</key>

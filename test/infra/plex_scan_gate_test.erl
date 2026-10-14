@@ -44,9 +44,28 @@ library_parse_error_does_not_reset_refresh_gate_test() ->
     ?assertEqual({ok, true}, plex_ffi:reserve_scan_gate_at(Base, Section, 309000, 300000)),
     clear_gate(Base, Section).
 
+section_trash_gate_cooldown_boundary_test() ->
+    Base = unique_base(),
+    Section = "4",
+    ?assertEqual({ok, true}, plex_ffi:reserve_trash_gate_at(Base, Section, 1000, 300000)),
+    ?assertEqual({ok, false}, plex_ffi:reserve_trash_gate_at(Base, Section, 300999, 300000)),
+    ?assertEqual({ok, true}, plex_ffi:reserve_trash_gate_at(Base, Section, 301000, 300000)),
+    clear_trash_gate(Base, Section).
+
+section_trash_gate_isolation_test() ->
+    Base = unique_base(),
+    ?assertEqual({ok, true}, plex_ffi:reserve_trash_gate_at(Base, "4", 1000, 300000)),
+    ?assertEqual({ok, true}, plex_ffi:reserve_trash_gate_at(Base, "5", 1000, 300000)),
+    clear_trash_gate(Base, "4"),
+    clear_trash_gate(Base, "5").
+
 unique_base() ->
     "http://plex-scan-gate-test-" ++ integer_to_list(erlang:unique_integer([positive, monotonic])).
 
 clear_gate(Base, Section) ->
     persistent_term:erase({plex_ffi, refresh_gate, Base, Section}),
+    ok.
+
+clear_trash_gate(Base, Section) ->
+    persistent_term:erase({plex_ffi, trash_gate, Base, Section}),
     ok.

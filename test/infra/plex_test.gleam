@@ -117,3 +117,42 @@ pub fn disabled_plex_configuration_returns_none_through_public_api_test() {
 
   result |> should.equal(Ok(None))
 }
+
+pub fn managed_section_parser_requires_exact_key_and_known_scan_state_test() {
+  let xml =
+    "<MediaContainer size=\"1\"><Directory key=\"4\" type=\"show\" refreshing=\"0\"><Location path=\"/Volumes/YouTube SSD/YouTube/library\"/></Directory></MediaContainer>"
+  plex.parse_managed_section_xml(xml, "4")
+  |> should.equal(
+    Ok(#("show", False, ["/Volumes/YouTube SSD/YouTube/library"])),
+  )
+  plex.parse_managed_section_xml(
+    "<MediaContainer><Directory key=\"4\" type=\"show\"><Location path=\"/x\"/></Directory></MediaContainer>",
+    "4",
+  )
+  |> should.be_error
+  plex.parse_managed_section_xml(xml, "5") |> should.be_error
+}
+
+pub fn section_paths_parser_requires_each_video_part_path_test() {
+  let xml =
+    "<MediaContainer size=\"1\" totalSize=\"1\" offset=\"0\"><Video ratingKey=\"1\"><Media><Part file=\"/Volumes/YouTube SSD/YouTube/library/Artist/Season 2026/One.mp4\"/></Media></Video></MediaContainer>"
+  plex.parse_section_paths_xml(xml)
+  |> should.equal(
+    Ok([
+      "/Volumes/YouTube SSD/YouTube/library/Artist/Season 2026/One.mp4",
+    ]),
+  )
+  plex.parse_section_paths_xml(
+    "<MediaContainer size=\"1\"><Video ratingKey=\"1\"><Media/></Video></MediaContainer>",
+  )
+  |> should.be_error
+  plex.parse_section_paths_xml("not XML") |> should.be_error
+  plex.parse_section_paths_xml(
+    "<MediaContainer size=\"1\" totalSize=\"2\" offset=\"0\"><Video ratingKey=\"1\"><Media><Part file=\"/Volumes/YouTube SSD/YouTube/library/Artist/one.mp4\"/></Media></Video></MediaContainer>",
+  )
+  |> should.be_error
+  plex.parse_section_paths_xml(
+    "<MediaContainer size=\"1\" totalSize=\"1\" offset=\"0\"><Video ratingKey=\"1\"><Media><Part file=\"/Volumes/YouTube SSD/YouTube/library/Artist/one.mp4\"/><Part/></Media></Video></MediaContainer>",
+  )
+  |> should.be_error
+}

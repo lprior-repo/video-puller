@@ -375,6 +375,7 @@ the next poll even while a long first backfill is still running.
 | `MIN_FREE_GB` | Stop downloads when the required volume drops below this free-space reserve | `50` | No |
 | `PLEX_URL` | Optional local Plex server URL | unset | No |
 | `PLEX_SECTION_ID` | Plex library section to refresh and enrich | unset | No |
+| `PLEX_MANAGED_TRASH_CLEANUP` | Clear stale metadata from the exact healthy managed YouTube section only | `false` | No |
 | `PLEX_SCAN_COOLDOWN_SECONDS` | Shared minimum spacing between scan attempts, clamped to 30–3600 seconds | `300` | No |
 | `PLEX_PARENT_SCAN_EXCLUSION` | Exclude DATA_DIR from volume-root Plex libraries; dedicated library must use DATA_DIR/library | `false` | No |
 
@@ -498,6 +499,13 @@ Ready-for-Plex checklist:
    channel and at startup. The local macOS Plex token is read in memory from
    Plex preferences. Enable Plex's automatic scans to index files promptly.
    Without the optional connection, Plex can scan the same library normally.
+   `PLEX_MANAGED_TRASH_CLEANUP=true` is an optional, disabled-by-default
+   setting that clears missing metadata only from the configured YouTube
+   section. It runs only when Plex reports an idle TV section whose sole
+   location exactly matches `DATA_DIR/library`, the configured storage volume
+   UUID is mounted, every existing managed video is indexed, and each missing
+   item's nearest existing ancestor inside the library is readable. It uses the section-specific
+   `emptyTrash` endpoint and never clears server-wide or other-section trash.
 
 ### macOS (Plex server)
 

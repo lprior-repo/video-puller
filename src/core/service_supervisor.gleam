@@ -2,6 +2,7 @@
 ///
 /// A failure in an upstream service restarts all dependent services that start
 /// after it, while leaving independent upstream children running.
+import core/managed_trash
 import core/manager
 import core/storage_guard
 import core/subscription_manager.{type SubscriptionMessage}
@@ -131,7 +132,10 @@ fn subscription_child(
 fn plex_child() -> supervision.ChildSpecification(Nil) {
   supervision.worker(fn() {
     actor.new_with_initialiser(15_000, fn(_subject) {
-      plex.start_title_sync(ytdl_sub.layout_from_env().library_dir)
+      plex.start_title_sync(
+        ytdl_sub.layout_from_env().library_dir,
+        managed_trash.cleanup,
+      )
       Ok(actor.initialised(Nil))
     })
     |> actor.start

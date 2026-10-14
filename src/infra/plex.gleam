@@ -27,10 +27,14 @@ pub fn refresh_library() -> Nil {
 
 /// Plex scans asynchronously. Revisit titles after scans finish, including
 /// while a poll is idle, so the final downloaded episode is enriched too.
-pub fn start_title_sync(library_dir: String) -> Nil {
+pub fn start_title_sync(
+  library_dir: String,
+  trash_cleanup: fn(String) -> Result(Bool, String),
+) -> Nil {
   case envoy.get("PLEX_SECTION_ID") {
     Ok(section) if section != "" -> {
-      let _ = process.spawn(fn() { title_sync_loop(library_dir, None) })
+      let _ =
+        process.spawn(fn() { title_sync_loop(library_dir, trash_cleanup, None) })
       Nil
     }
     _ -> Nil
@@ -38,7 +42,11 @@ pub fn start_title_sync(library_dir: String) -> Nil {
   Nil
 }
 
-fn title_sync_loop(library_dir: String, last_error: Option(String)) -> Nil {
+fn title_sync_loop(
+  library_dir: String,
+  trash_cleanup: fn(String) -> Result(Bool, String),
+  last_error: Option(String),
+) -> Nil {
   process.sleep(30_000)
   let error = case plex_library_videos_result() {
     Error(message) -> Some(message)
@@ -47,7 +55,7 @@ fn title_sync_loop(library_dir: String, last_error: Option(String)) -> Nil {
       enrich_video_titles(library_dir, videos)
       let known = list.map(videos, fn(video) { video.1 })
       let files = ytdl_sub.list_library_media(library_dir)
-      case needs_scan(files, known) {
+      let scan_error = case needs_scan(files, known) {
         False -> None
         True ->
           case plex_refresh_library_result(scan_cooldown_ms()) {
@@ -55,6 +63,14 @@ fn title_sync_loop(library_dir: String, last_error: Option(String)) -> Nil {
             // a later library read confirms that Plex indexed every file.
             Ok(_) -> last_error
             Error(message) -> Some(message)
+          }
+      }
+      case trash_cleanup(library_dir) {
+        Ok(_) -> scan_error
+        Error(message) ->
+          case scan_error {
+            Some(_) -> scan_error
+            None -> Some(message)
           }
       }
     }
@@ -65,7 +81,7 @@ fn title_sync_loop(library_dir: String, last_error: Option(String)) -> Nil {
     None, Some(_) -> io.println("Plex sync recovered")
     _, _ -> Nil
   }
-  title_sync_loop(library_dir, error)
+  title_sync_loop(library_dir, trash_cleanup, error)
 }
 
 fn scan_cooldown_ms() -> Int {
@@ -231,6 +247,29 @@ pub fn parse_videos_xml(xml: String) -> List(#(String, String, String)) {
   plex_parse_videos(xml)
 }
 
+/// Parse a section-list XML document for one section key. The result contains
+/// its type, scan state and configured locations, or an error on ambiguity.
+pub fn parse_managed_section_xml(
+  xml: String,
+  section_id: String,
+) -> Result(#(String, Bool, List(String)), String) {
+  plex_parse_managed_section(xml, section_id)
+}
+
+/// Parse all media file paths in a Plex section response. Every Video must
+/// include a Part file path for the response to be considered complete.
+pub fn parse_section_paths_xml(xml: String) -> Result(List(String), String) {
+  plex_parse_section_paths(xml)
+}
+
+/// Read a strict section snapshot for guarded trash cleanup.
+pub fn managed_section_inventory_result() -> Result(
+  #(String, Bool, List(String), List(String)),
+  String,
+) {
+  plex_managed_section_inventory_result()
+}
+
 /// Return watched file paths, None when Plex cleanup is not configured, and an
 /// error when a configured Plex server cannot be reached or parsed.
 pub fn watched_video_paths_result() -> Result(Option(List(String)), String) {
@@ -270,6 +309,12 @@ fn plex_library_videos_result() -> Result(
   String,
 )
 
+@external(erlang, "plex_ffi", "managed_section_inventory_result")
+fn plex_managed_section_inventory_result() -> Result(
+  #(String, Bool, List(String), List(String)),
+  String,
+)
+
 @external(erlang, "plex_ffi", "watched_videos_result")
 fn plex_watched_videos_result() -> Result(
   #(Bool, #(List(String), List(String))),
@@ -281,6 +326,15 @@ fn plex_update_title(rating_key: String, title: String) -> Nil
 
 @external(erlang, "plex_ffi", "parse_videos")
 fn plex_parse_videos(xml: String) -> List(#(String, String, String))
+
+@external(erlang, "plex_ffi", "parse_managed_section")
+fn plex_parse_managed_section(
+  xml: String,
+  section_id: String,
+) -> Result(#(String, Bool, List(String)), String)
+
+@external(erlang, "plex_ffi", "parse_section_paths")
+fn plex_parse_section_paths(xml: String) -> Result(List(String), String)
 
 @external(erlang, "plex_ffi", "parse_watched_paths")
 fn plex_parse_watched_paths(xml: String) -> List(String)

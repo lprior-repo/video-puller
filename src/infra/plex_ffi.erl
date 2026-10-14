@@ -2,7 +2,7 @@
 
 -include_lib("xmerl/include/xmerl.hrl").
 
--export([refresh_library/0, refresh_library_result/1, reserve_scan_gate_at/4, library_videos/0, library_videos_result/0, watched_videos_result/0, update_title/2, parse_videos/1, parse_watched_paths/1, parse_active_paths/1]).
+-export([refresh_library/0, refresh_library_result/1, reserve_scan_gate_at/4, library_videos/0, library_videos_result/0, watched_videos_result/0, managed_section_inventory_result/0, empty_section_trash_result/0, reserve_trash_gate_at/4, parse_managed_section/2, parse_section_paths/1, update_title/2, parse_videos/1, parse_watched_paths/1, parse_active_paths/1]).
 
 -define(DEFAULT_BASE_URL, "http://127.0.0.1:32400").
 -define(DEFAULT_SECTION_ID, "").
@@ -85,6 +85,158 @@ watched_videos_result() ->
             _ -> {error, <<"local Plex server unavailable">>}
         end
     end, {ok, {false, {[], []}}}).
+
+%% Return strict inventory for the configured section. No path or scanner
+%% defaults are inferred: malformed or incomplete responses fail closed.
+managed_section_inventory_result() ->
+    with_token_result(fun(Token) ->
+        Section = section_id(),
+        SectionsUrl = base_url() ++ "/library/sections?X-Plex-Token=" ++ quote(Token),
+        ItemsUrl = base_url() ++ "/library/sections/" ++ Section ++
+            "/all?type=4&X-Plex-Container-Start=0&X-Plex-Container-Size=100000&X-Plex-Token=" ++ quote(Token),
+        case request(get, SectionsUrl) of
+            {ok, SectionsBody} ->
+                case parse_managed_section(SectionsBody, Section) of
+                    {ok, {Type, Refreshing, Locations}} ->
+                        case request(get, ItemsUrl) of
+                            {ok, ItemsBody} ->
+                                case parse_section_paths(ItemsBody) of
+                                    {ok, Paths} -> {ok, {Type, Refreshing, Locations, Paths}};
+                                    {error, _} -> {error, <<"Plex section items could not be parsed">>}
+                                end;
+                            _ -> {error, <<"Plex section items are unavailable">>}
+                        end;
+                    {error, _} = Error -> Error
+                end;
+            _ -> {error, <<"Plex sections are unavailable">>}
+        end
+    end, {error, <<"Plex credentials or library section unavailable">>}).
+
+%% This endpoint is intentionally section-scoped. A separate persistent-term
+%% gate prevents stale trash listings from causing repeated destructive PUTs.
+empty_section_trash_result() ->
+    with_token_result(fun(Token) ->
+        Base = base_url(),
+        Section = section_id(),
+        case reserve_trash_gate(Base, Section, 300000) of
+            {ok, false} -> {ok, false};
+            {ok, true} ->
+                Url = Base ++ "/library/sections/" ++ Section ++
+                    "/emptyTrash?X-Plex-Token=" ++ quote(Token),
+                case request(put, Url) of
+                    {ok, _} -> {ok, true};
+                    _ -> {error, <<"Plex section trash cleanup failed">>}
+                end;
+            {error, _} = Error -> Error
+        end
+    end, {error, <<"Plex credentials or library section unavailable">>}).
+
+reserve_trash_gate(Base, Section, CooldownMs) ->
+    reserve_trash_gate_at(Base, Section, erlang:monotonic_time(millisecond), CooldownMs).
+
+reserve_trash_gate_at(Base, Section, Now, CooldownMs) ->
+    Key = {?MODULE, trash_gate, Base, Section},
+    Lock = {Key, self()},
+    Cooldown = max(CooldownMs, 0),
+    case global:trans(Lock, fun() ->
+        case persistent_term:get(Key, undefined) of
+            Until when is_integer(Until), Now < Until -> false;
+            _ ->
+                persistent_term:put(Key, Now + Cooldown),
+                true
+        end
+    end) of
+        true -> {ok, true};
+        false -> {ok, false};
+        aborted -> {error, <<"Plex trash cleanup gate unavailable">>}
+    end.
+
+parse_managed_section(Body, SectionId) ->
+    try
+        {Xml, _} = xmerl_scan:string(binary_to_list(Body), [{quiet, true}, {encoding, "utf-8"}]),
+        case Xml of
+            #xmlElement{name = 'MediaContainer'} ->
+                Directories = xmerl_xpath:string("//Directory", Xml),
+                SectionKey = section_key(SectionId),
+                Matches = [Directory || #xmlElement{} = Directory <- Directories,
+                    maps:get("key", attrs(Directory#xmlElement.attributes), "") =:= SectionKey],
+                case Matches of
+                    [Directory] ->
+                        Attrs = attrs(Directory#xmlElement.attributes),
+                        Type = maps:get("type", Attrs, ""),
+                        Refreshing = parse_refreshing(maps:get("refreshing", Attrs, "")),
+                        Locations = xmerl_xpath:string(".//Location", Directory),
+                        Paths = [maps:get("path", attrs(Location#xmlElement.attributes), "") ||
+                            #xmlElement{} = Location <- Locations],
+                        case Type =/= [] andalso Refreshing =/= error andalso
+                                length(Paths) =:= length(Locations) andalso
+                                not lists:member([], Paths) of
+                            true ->
+                                {ok, {unicode:characters_to_binary(Type), Refreshing,
+                                    [unicode:characters_to_binary(Path) || Path <- Paths]}};
+                            false -> {error, <<"invalid Plex section metadata">>}
+                        end;
+                    _ -> {error, <<"configured Plex section was not found uniquely">>}
+                end;
+            _ -> {error, <<"invalid Plex sections XML">>}
+        end
+    catch
+        _:_ -> {error, <<"invalid Plex sections XML">>}
+    end.
+
+parse_section_paths(Body) ->
+    try
+        {Xml, _} = xmerl_scan:string(binary_to_list(Body), [{quiet, true}, {encoding, "utf-8"}]),
+        case Xml of
+            #xmlElement{name = 'MediaContainer'} ->
+                Videos = xmerl_xpath:string("//Video", Xml),
+                case complete_container(Xml, Videos) of
+                    true -> case [video_part_paths(Video) || #xmlElement{} = Video <- Videos] of
+                        PathsByVideo ->
+                            case lists:all(fun(Paths) -> Paths =/= error end, PathsByVideo) of
+                                true ->
+                                    Paths = lists:append(PathsByVideo),
+                                    {ok, lists:usort([unicode:characters_to_binary(Path) || Path <- Paths])};
+                                false -> {error, <<"invalid Plex section media paths">>}
+                            end
+                    end;
+                    false -> {error, <<"incomplete Plex section media response">>}
+                end;
+            _ -> {error, <<"invalid Plex section media XML">>}
+        end
+    catch
+        _:_ -> {error, <<"invalid Plex section media XML">>}
+    end.
+
+parse_refreshing("0") -> false;
+parse_refreshing("false") -> false;
+parse_refreshing("1") -> true;
+parse_refreshing("true") -> true;
+parse_refreshing(_) -> error.
+
+complete_container(Xml, Videos) ->
+    try
+        Attrs = attrs(Xml#xmlElement.attributes),
+        Size = list_to_integer(maps:get("size", Attrs)),
+        TotalSize = list_to_integer(maps:get("totalSize", Attrs)),
+        Offset = list_to_integer(maps:get("offset", Attrs)),
+        Size =:= length(Videos) andalso TotalSize =:= Size andalso Offset =:= 0
+    catch
+        _:_ -> false
+    end.
+
+video_part_paths(Video) ->
+    Parts = xmerl_xpath:string(".//Part", Video),
+    case Parts =/= [] andalso lists:all(fun
+        (#xmlElement{attributes = Attributes}) -> maps:get("file", attrs(Attributes), "") =/= [];
+        (_) -> false
+    end, Parts) of
+        true -> [maps:get("file", attrs(Part#xmlElement.attributes)) || Part <- Parts];
+        false -> error
+    end.
+
+section_key(SectionId) when is_binary(SectionId) -> binary_to_list(SectionId);
+section_key(SectionId) -> SectionId.
 
 update_title(RatingKey, Title) ->
     with_token(fun(Token) ->
