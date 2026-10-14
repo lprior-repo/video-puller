@@ -77,11 +77,58 @@ fn run_migration(
 
   case already_applied {
     True -> Ok(Nil)
-    False -> {
-      use _ <- result.try(db.exec_raw(conn, sql))
-      record_migration(conn, filename)
-    }
+    False -> apply_migration(conn, filename, sql)
   }
+}
+
+/// Apply schema changes and their tracking row as one SQLite transaction.
+/// This closes the crash window where DDL succeeded but the version row did not.
+fn apply_migration(
+  conn: Db,
+  filename: String,
+  sql: String,
+) -> Result(Nil, DbError) {
+  use _ <- result.try(db.exec_raw(conn, "BEGIN IMMEDIATE"))
+  case db.exec_raw(conn, transactional_sql(filename, sql)) {
+    Error(error) -> {
+      rollback(conn)
+      Error(error)
+    }
+    Ok(_) ->
+      case record_migration(conn, filename) {
+        Error(error) -> {
+          rollback(conn)
+          Error(error)
+        }
+        Ok(_) ->
+          case db.exec_raw(conn, "COMMIT") {
+            Ok(_) -> Ok(Nil)
+            Error(error) -> {
+              rollback(conn)
+              Error(error)
+            }
+          }
+      }
+  }
+}
+
+/// Connection-level pragmas are configured by db.init_db before migration
+/// transactions begin. Historical migration 001 repeats two pragmas that
+/// cannot be changed inside a transaction; omit those statements while keeping
+/// the original migration file and its tracked version untouched.
+fn transactional_sql(filename: String, sql: String) -> String {
+  case filename {
+    "001_init.sql" ->
+      sql
+      |> string.replace("PRAGMA journal_mode=WAL;", "")
+      |> string.replace("PRAGMA synchronous=NORMAL;", "")
+    _ -> sql
+  }
+}
+
+fn rollback(conn: Db) -> Nil {
+  let _ = db.exec_raw(conn, "ROLLBACK")
+  Nil
 }
 
 /// Check if a migration has already been applied

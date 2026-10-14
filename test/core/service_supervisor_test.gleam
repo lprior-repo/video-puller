@@ -55,11 +55,17 @@ pub fn production_tree_restarts_subscription_and_real_mist_server_test() {
   let first_subscription =
     process.subject_owner(services.subscription_manager) |> should.be_ok()
   let first_storage = child_by_id(services.supervisor_pid, 0)
-  let first_download = child_by_id(services.supervisor_pid, 1)
+  let first_download = child_by_id(services.supervisor_pid, 2)
+  let first_guard = child_by_id(services.supervisor_pid, 1)
+  let first_plex = child_by_id(services.supervisor_pid, 5)
+  let first_backup = child_by_id(services.supervisor_pid, 6)
+  initial_module(first_storage) |> should.equal("core@storage_guard")
+  initial_module(first_plex) |> should.equal("infra@plex")
+  initial_module(first_backup) |> should.equal("core@state_backup")
   let first_http = wait_for_http_child(services.supervisor_pid)
   wait_for_routes() |> should.be_true()
 
-  // The third production child is the real named subscription actor. OTP
+  // The fourth production child is the real named subscription actor. OTP
   // restarts it and every later child; the preceding download service lives.
   test_exit(first_subscription, "kill")
   let second_subscription =
@@ -86,7 +92,7 @@ pub fn production_tree_restarts_subscription_and_real_mist_server_test() {
   // preserving the independent storage guard process.
   test_exit(first_download, "kill")
   let second_download =
-    wait_for_new_child(services.supervisor_pid, 1, first_download)
+    wait_for_new_child(services.supervisor_pid, 2, first_download)
   let third_subscription =
     wait_for_new_subscription(
       services.subscription_manager,
@@ -99,6 +105,29 @@ pub fn production_tree_restarts_subscription_and_real_mist_server_test() {
   process.is_alive(first_storage) |> should.be_true()
   wait_for_routes() |> should.be_true()
 
+  // The backup service is the actual work process, owned directly by OTP.
+  // Its crash must not disturb the preceding web or downloader services.
+  let backup_before = child_by_id(services.supervisor_pid, 6)
+  // A listener may retry binding during the preceding cascade. Capture the
+  // supervisor now serving healthy routes rather than an intermediate PID.
+  let stable_http = wait_for_http_child(services.supervisor_pid)
+  test_exit(backup_before, "kill")
+  let replacement_backup =
+    wait_for_new_child(services.supervisor_pid, 6, backup_before)
+  initial_module(replacement_backup) |> should.equal("core@state_backup")
+  process.subject_owner(services.subscription_manager)
+  |> should.equal(Ok(third_subscription))
+  process.is_alive(second_download) |> should.be_true()
+  process.is_alive(stable_http) |> should.be_true()
+  wait_for_http_child(services.supervisor_pid) |> should.equal(stable_http)
+
+  // Losing the guardian restarts dependent actors after restoring ownership.
+  test_exit(first_guard, "kill")
+  let _ = wait_for_new_child(services.supervisor_pid, 1, first_guard)
+  let _ =
+    wait_for_new_subscription(services.subscription_manager, third_subscription)
+  wait_for_routes() |> should.be_true()
+
   stop_supervisor(services.supervisor_pid)
   let _ = db.close(connection)
   restore_env(env)
@@ -108,6 +137,9 @@ pub fn production_tree_restarts_subscription_and_real_mist_server_test() {
   let _ = simplifile.delete_all([data_dir])
   Nil
 }
+
+@external(erlang, "service_supervisor_test_ffi", "initial_module")
+fn initial_module(pid: process.Pid) -> String
 
 type EnvValue {
   EnvValue(name: String, previous: Option(String))

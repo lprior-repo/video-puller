@@ -85,9 +85,8 @@ pub fn check_volume() -> Result(Nil, String) {
 }
 
 /// Runs as a linked BEAM process; launchd retries after storage is available.
-pub fn start() -> Nil {
-  let _ = process.spawn(loop)
-  Nil
+pub fn start() -> process.Pid {
+  process.spawn(loop)
 }
 
 fn loop() -> Nil {

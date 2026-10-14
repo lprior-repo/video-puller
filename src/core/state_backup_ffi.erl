@@ -27,7 +27,10 @@ prepare_snapshot(Root, Day) ->
     case {file:read_link_info(Final), file:read_link_info(Stage)} of
         {{ok, #file_info{type = directory}}, _} ->
             case marker(Final, "complete") of
-                true -> {ok, {false, <<>>, list_to_binary(Final)}};
+                true -> case sync_published_root(Root) of
+                    {ok, nil} -> {ok, {false, <<>>, list_to_binary(Final)}};
+                    Error -> Error
+                end;
                 false -> {error, <<"snapshot destination already exists">>}
             end;
         {{error, enoent}, {ok, #file_info{type = directory}}} ->
@@ -58,10 +61,31 @@ publish(Stage0, Final0) ->
     case {marker(Stage, "staging"), file:read_link_info(Final)} of
         {true, {error, enoent}} ->
             case write_marker(Stage, "complete") of
-                ok -> case file:rename(Stage, Final) of ok -> {ok, nil}; {error, Why} -> {error, reason(Why)} end;
+                ok -> case sync_directory(Stage) of
+                    {ok, nil} -> case file:rename(Stage, Final) of
+                        ok -> sync_published_root(filename:dirname(Final));
+                        {error, Why} -> {error, reason(Why)}
+                    end;
+                    Error -> Error
+                end;
                 Error -> Error
             end;
         _ -> {error, <<"snapshot cannot be published safely">>}
+    end.
+
+sync_directory(Path) ->
+    case file:open(Path, [read, raw, directory]) of
+        {ok, Directory} ->
+            Result = file:sync(Directory),
+            _ = file:close(Directory),
+            case Result of ok -> {ok, nil}; {error, Why} -> {error, reason(Why)} end;
+        {error, Why} -> {error, reason(Why)}
+    end.
+
+sync_published_root(Root) ->
+    case sync_directory(Root) of
+        {ok, nil} -> sync_directory(filename:dirname(Root));
+        Error -> Error
     end.
 
 copy_file(Source0, Dest0) ->

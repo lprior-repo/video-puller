@@ -52,6 +52,13 @@ pub type SubscriptionMessage {
   PollWorkerDown(generation: Int, down: Down)
 }
 
+/// Start the owned poll cleanup guardian before the subscription actor.
+pub fn start_poll_guard() -> actor.StartResult(Nil) {
+  poll_guard_start_link()
+  |> result.map(fn(pid) { actor.Started(pid:, data: Nil) })
+  |> result.map_error(actor.InitFailed)
+}
+
 /// Internal state of the subscription manager
 pub opaque type SubscriptionState {
   SubscriptionState(
@@ -735,41 +742,57 @@ fn start_poll(
       let generation = state.poll_generation + 1
       let worker =
         process.spawn_unlinked(fn() {
-          let outcome = state.run_poll()
-          process.send(self, PollFinished(generation, outcome))
+          // Do not start external work until ownership has been acknowledged.
+          case await_poll_start() {
+            True -> {
+              let outcome = state.run_poll()
+              process.send(self, PollFinished(generation, outcome))
+            }
+            False -> Nil
+          }
         })
       let worker_monitor = process.monitor(worker)
-      case state.poll_guard_name {
+      let tracked = case state.poll_guard_name {
         Some(name) -> guard_poll_worker(name, process.self(), worker)
-        None -> Nil
+        None -> Ok(Nil)
       }
-      // Two engine passes share the poll budget, so the watchdog leaves room
-      // for both deadlines plus the startup and teardown of each process
-      let watchdog_delay =
-        int.min(
-          state.watchdog_ms,
-          safe_minutes(state.config.poll_interval_minutes) * 60_000,
-        )
-      let watchdog =
-        process.send_after(self, watchdog_delay, PollWatchdog(generation))
-      actor.continue(
-        SubscriptionState(
-          ..state,
-          is_polling: True,
-          poll_started_at: Some(get_timestamp()),
-          watchdog: Some(watchdog),
-          poll_generation: generation,
-          worker: Some(worker),
-          worker_monitor: Some(worker_monitor),
-        ),
-      )
-      |> actor.with_selector(
-        process.new_selector()
-        |> process.select(self)
-        |> process.select_specific_monitor(worker_monitor, fn(down) {
-          PollWorkerDown(generation, down)
-        }),
-      )
+      case tracked {
+        Error(message) -> {
+          stop_worker(worker)
+          process.demonitor_process(worker_monitor)
+          actor.stop_abnormal(message)
+        }
+        Ok(_) -> {
+          release_poll_worker(worker)
+          // Two engine passes share the poll budget, so the watchdog leaves room
+          // for both deadlines plus the startup and teardown of each process
+          let watchdog_delay =
+            int.min(
+              state.watchdog_ms,
+              safe_minutes(state.config.poll_interval_minutes) * 60_000,
+            )
+          let watchdog =
+            process.send_after(self, watchdog_delay, PollWatchdog(generation))
+          actor.continue(
+            SubscriptionState(
+              ..state,
+              is_polling: True,
+              poll_started_at: Some(get_timestamp()),
+              watchdog: Some(watchdog),
+              poll_generation: generation,
+              worker: Some(worker),
+              worker_monitor: Some(worker_monitor),
+            ),
+          )
+          |> actor.with_selector(
+            process.new_selector()
+            |> process.select(self)
+            |> process.select_specific_monitor(worker_monitor, fn(down) {
+              PollWorkerDown(generation, down)
+            }),
+          )
+        }
+      }
     }
     None -> actor.continue(state)
   }
@@ -885,7 +908,16 @@ fn guard_poll_worker(
   name: Name(SubscriptionMessage),
   manager: Pid,
   worker: Pid,
-) -> Nil
+) -> Result(Nil, String)
+
+@external(erlang, "subscription_manager_ffi", "start_link")
+fn poll_guard_start_link() -> Result(Pid, String)
+
+@external(erlang, "subscription_manager_ffi", "await_poll_start")
+fn await_poll_start() -> Bool
+
+@external(erlang, "subscription_manager_ffi", "release_poll_worker")
+fn release_poll_worker(worker: Pid) -> Nil
 
 fn remaining_poll_time(deadline: Int) -> Result(Int, String) {
   let remaining = deadline - monotonic_milliseconds()

@@ -326,11 +326,19 @@ pub fn named_manager_restart_waits_for_old_downloader_cleanup_test() {
   process_running(root_pid) |> should.be_true()
   process_running(child_pid) |> should.be_true()
 
+  // Lose the guardian first: its restored ownership journal must still stop
+  // the old downloader when the manager then crashes and restarts.
+  test_kill_poll_guard()
   // Simulate a manager crash. The stable-name restart must block until its
   // guardian has stopped the worker and verified downloader process tree.
   let assert Ok(old_manager_pid) = process.named(name)
   process.unlink(old_manager_pid)
+  let gone = process.monitor(old_manager_pid)
   process.kill(old_manager_pid)
+  process.new_selector()
+  |> process.select_specific_monitor(gone, fn(_) { Nil })
+  |> process.selector_receive(2000)
+  |> should.be_ok()
   let restarted =
     subscription_manager.start_named(conn, name)
     |> should.be_ok()
@@ -351,6 +359,9 @@ pub fn named_manager_restart_waits_for_old_downloader_cleanup_test() {
   }
   let _ = delete_tree(root)
 }
+
+@external(erlang, "service_supervisor_test_ffi", "kill_poll_guard")
+fn test_kill_poll_guard() -> Nil
 
 @external(erlang, "shell_test_ffi", "set_env")
 fn set_env(name: String, value: String) -> Bool

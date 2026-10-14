@@ -19,15 +19,13 @@ const daily_seconds = 86_400
 
 /// Start an immediate snapshot worker when STATE_BACKUP_DIR is configured.
 /// Failures retry hourly; successful daily snapshots run once per day.
-pub fn start(database: Db) -> Nil {
+pub fn start(database: Db) -> process.Pid {
   case backup_directory() {
     Some(backup_dir) -> {
       let data_root = data_root()
-      let _ =
-        process.spawn(fn() { backup_loop(database, data_root, backup_dir) })
-      Nil
+      process.spawn(fn() { backup_loop(database, data_root, backup_dir) })
     }
-    None -> Nil
+    None -> process.spawn(fn() { process.sleep_forever() })
   }
 }
 

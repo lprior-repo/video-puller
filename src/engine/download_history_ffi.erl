@@ -6,7 +6,7 @@ remember(DataRoot, VideoId) ->
     Lock = {{?MODULE, Path}, self()},
     case global:trans(Lock, fun() ->
         case filelib:ensure_dir(Path) of
-            ok -> append_once(Path, VideoId);
+            ok -> durable_append(Path, fun() -> append_once(Path, VideoId) end);
             {error, Reason} -> {error, format_error(Reason)}
         end
     end) of
@@ -20,13 +20,57 @@ remember_many(DataRoot, VideoIds) ->
     Lock = {{?MODULE, Path}, self()},
     case global:trans(Lock, fun() ->
         case filelib:ensure_dir(Path) of
-            ok -> append_missing(Path, VideoIds);
+            ok -> durable_append(Path, fun() -> append_missing(Path, VideoIds) end);
             {error, Reason} -> {error, format_error(Reason)}
         end
     end) of
         ok -> {ok, nil};
         {error, Reason} -> {error, Reason};
         aborted -> {error, <<"download history lock unavailable">>}
+    end.
+
+%% A prior write may have reached the page cache even if its fsync failed.
+%% Repeated remembers must retry syncing, not treat a visible ID as durability.
+%% Also sync directory entries, including first creation of the ledger folder.
+durable_append(Path, Append) ->
+    case Append() of
+        ok -> sync_ledger(Path);
+        Error -> Error
+    end.
+
+sync_ledger(Path) ->
+    case file:open(Path, [append, raw, binary]) of
+        {ok, File} ->
+            Sync = file:sync(File),
+            Closed = file:close(File),
+            case {Sync, Closed} of
+                {ok, ok} ->
+                    Parent = filename:dirname(Path),
+                    case sync_directory(Parent) of
+                        ok ->
+                            Grandparent = filename:dirname(Parent),
+                            case sync_directory(Grandparent) of
+                                ok -> sync_directory(filename:dirname(Grandparent));
+                                Error -> Error
+                            end;
+                        Error -> Error
+                    end;
+                {{error, Why}, _} -> {error, format_error(Why)};
+                {_, {error, Why}} -> {error, format_error(Why)}
+            end;
+        {error, Why} -> {error, format_error(Why)}
+    end.
+
+sync_directory(Path) ->
+    case file:open(Path, [read, raw, directory]) of
+        {ok, Directory} ->
+            Result = file:sync(Directory),
+            _ = file:close(Directory),
+            case Result of
+                ok -> ok;
+                {error, Why} -> {error, format_error(Why)}
+            end;
+        {error, Why} -> {error, format_error(Why)}
     end.
 
 read_archive(DataRoot) ->

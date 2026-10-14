@@ -10,7 +10,7 @@
 import core/pool_types.{
   type PoolMessage, type PoolStats, GetStatus, HealthCheck, PoolStats,
   PoolStatus, ProcessQueue, RateLimitedDispatch, ScaleWorkers, SetSelf, Shutdown,
-  SubmitJob, WorkerDone, WorkerFailed,
+  SubmitJob, WorkerDone, WorkerDown, WorkerFailed,
 }
 import domain/core_types.{
   type DownloadResult, type JobId, Completed, DownloadComplete, DownloadFailed,
@@ -20,12 +20,14 @@ import domain/types.{type ManagerMessage, JobStatusUpdate}
 import engine/downloader
 import engine/ytdlp
 import gleam/dict.{type Dict}
-import gleam/erlang/process.{type Subject}
+import gleam/erlang/process.{type Down, type Monitor, type Pid, type Subject}
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/otp/factory_supervisor
+import gleam/otp/supervision
 import gleam/result
 import simplifile
 
@@ -35,7 +37,7 @@ pub opaque type WorkerPoolState {
     config: ytdlp.DownloadConfig,
     manager_subject: Subject(ManagerMessage),
     // Available workers ready for work
-    available_workers: List(Subject(WorkerMessage)),
+    available_workers: List(Worker),
     // Workers currently processing jobs (worker -> job_id)
     busy_workers: Dict(String, WorkerInfo),
     // Pending work queue (for backpressure)
@@ -48,16 +50,33 @@ pub opaque type WorkerPoolState {
     worker_index: Int,
     // Self reference for scheduling
     self: Option(Subject(PoolMessage)),
+    // Factory supervisor is linked to this pool and owns all worker actors.
+    factory: Option(
+      #(factory_supervisor.Supervisor(WorkerArgs, Subject(WorkerMessage)), Pid),
+    ),
     // Statistics for adaptive scaling
     stats: PoolStats,
     // Rate limiting: timestamp of last job dispatch
     last_dispatch_ts: Int,
+    runner: fn(JobId, String, ytdlp.DownloadConfig, Subject(ManagerMessage)) ->
+      Result(DownloadResult, String),
   )
 }
 
 /// Information about a busy worker
 pub type WorkerInfo {
-  WorkerInfo(job_id: JobId, worker: Subject(WorkerMessage), started_at: Int)
+  WorkerInfo(
+    job_id: JobId,
+    worker: Worker,
+    started_at_ms: Int,
+    timeout_ms: Int,
+    timeout_error: Option(String),
+  )
+}
+
+/// A worker's message subject and owner process, kept together for safe termination.
+pub type Worker {
+  Worker(subject: Subject(WorkerMessage), pid: Pid, monitor: Monitor)
 }
 
 /// Pending work item
@@ -94,6 +113,17 @@ pub type WorkerState {
     config: ytdlp.DownloadConfig,
     worker_id: String,
     current_job: Option(JobId),
+    runner: fn(JobId, String, ytdlp.DownloadConfig, Subject(ManagerMessage)) ->
+      Result(DownloadResult, String),
+  )
+}
+
+type WorkerArgs {
+  WorkerArgs(
+    config: ytdlp.DownloadConfig,
+    worker_id: String,
+    runner: fn(JobId, String, ytdlp.DownloadConfig, Subject(ManagerMessage)) ->
+      Result(DownloadResult, String),
   )
 }
 
@@ -103,6 +133,26 @@ pub fn start(
   manager_subject: Subject(ManagerMessage),
   min_workers: Int,
   max_workers: Int,
+) -> Result(Subject(PoolMessage), actor.StartError) {
+  start_with_runner(
+    config,
+    manager_subject,
+    min_workers,
+    max_workers,
+    fn(job_id, url, job_config, manager) {
+      execute_download_safely(job_id, url, job_config, manager)
+    },
+  )
+}
+
+/// Start a worker pool with an injectable executor for deterministic recovery tests.
+pub fn start_with_runner(
+  config: ytdlp.DownloadConfig,
+  manager_subject: Subject(ManagerMessage),
+  min_workers: Int,
+  max_workers: Int,
+  runner: fn(JobId, String, ytdlp.DownloadConfig, Subject(ManagerMessage)) ->
+    Result(DownloadResult, String),
 ) -> Result(Subject(PoolMessage), actor.StartError) {
   let initial_state =
     WorkerPoolState(
@@ -116,13 +166,17 @@ pub fn start(
       current_worker_count: 0,
       worker_index: 0,
       self: None,
+      factory: None,
       stats: PoolStats(
         total_completed: 0,
         total_failed: 0,
         avg_completion_time_ms: 0,
         queue_high_water_mark: 0,
       ),
-      last_dispatch_ts: 0,
+      // A first job is immediately eligible even if the monotonic epoch is
+      // negative or otherwise unrelated to zero.
+      last_dispatch_ts: get_monotonic_time_ms() - config.rate_limit_delay_ms,
+      runner: runner,
     )
 
   actor.start(
@@ -148,12 +202,29 @@ fn handle_pool_message(
 ) -> actor.Next(WorkerPoolState, PoolMessage) {
   case message {
     SetSelf(subject) -> {
-      actor.continue(WorkerPoolState(..state, self: Some(subject)))
+      case
+        factory_supervisor.worker_child(start_factory_worker)
+        |> factory_supervisor.restart_strategy(supervision.Temporary)
+        |> factory_supervisor.start
+      {
+        Ok(started) ->
+          pool_continue(
+            WorkerPoolState(
+              ..state,
+              self: Some(subject),
+              factory: Some(#(started.data, started.pid)),
+            ),
+          )
+        Error(_) ->
+          actor.stop_abnormal("Failed to start worker factory supervisor")
+      }
     }
+
+    WorkerDown(down) -> handle_worker_down(state, down)
 
     SubmitJob(job_id, url, config) -> {
       // Check rate limiting - convert to milliseconds for comparison
-      let current_time_ms = get_timestamp_ms()
+      let current_time_ms = get_monotonic_time_ms()
       let rate_limit_ms = state.config.rate_limit_delay_ms
       let time_since_last = current_time_ms - state.last_dispatch_ts
 
@@ -162,8 +233,9 @@ fn handle_pool_message(
         [worker, ..rest], True -> {
           // Rate limit allows and worker available - dispatch immediately
           let worker_id = "worker-" <> int.to_string(state.worker_index)
+          let worker_index = state.worker_index + 1
           assign_work_to_worker(
-            worker,
+            worker.subject,
             worker_id,
             job_id,
             url,
@@ -179,15 +251,18 @@ fn handle_pool_message(
               WorkerInfo(
                 job_id: job_id,
                 worker: worker,
-                started_at: get_timestamp(),
+                started_at_ms: get_monotonic_time_ms(),
+                timeout_ms: config.download_timeout_ms,
+                timeout_error: None,
               ),
             )
 
-          actor.continue(
+          pool_continue(
             WorkerPoolState(
               ..state,
               available_workers: rest,
               busy_workers: busy,
+              worker_index: worker_index,
               last_dispatch_ts: current_time_ms,
             ),
           )
@@ -200,7 +275,7 @@ fn handle_pool_message(
               job_id: job_id,
               url: url,
               config: config,
-              queued_at: get_timestamp(),
+              queued_at: get_monotonic_time_ms() / 1000,
             )
           let new_queue = list.append(state.work_queue, [work])
           let delay_needed = rate_limit_ms - time_since_last
@@ -213,7 +288,7 @@ fn handle_pool_message(
             None -> Nil
           }
 
-          actor.continue(WorkerPoolState(..state, work_queue: new_queue))
+          pool_continue(WorkerPoolState(..state, work_queue: new_queue))
         }
 
         [], _ -> {
@@ -223,7 +298,7 @@ fn handle_pool_message(
               job_id: job_id,
               url: url,
               config: config,
-              queued_at: get_timestamp(),
+              queued_at: get_monotonic_time_ms() / 1000,
             )
           let new_queue = list.append(state.work_queue, [work])
 
@@ -256,9 +331,9 @@ fn handle_pool_message(
                 }
                 None -> Nil
               }
-              actor.continue(new_state)
+              pool_continue(new_state)
             }
-            False -> actor.continue(new_state)
+            False -> pool_continue(new_state)
           }
         }
       }
@@ -274,7 +349,7 @@ fn handle_pool_message(
 
       // Get the worker subject from busy_workers
       case dict.get(state.busy_workers, worker_id) {
-        Ok(info) -> {
+        Ok(info) if info.job_id == job_id && info.timeout_error == None -> {
           // Verify the download result and check file existence
           let #(status, path, stats_update) = case result {
             DownloadComplete(_, reported_path) -> {
@@ -345,11 +420,11 @@ fn handle_pool_message(
             None -> Nil
           }
 
-          actor.continue(new_state)
+          pool_continue(new_state)
         }
-        Error(_) -> {
+        _ -> {
           // Worker not in busy list - ignore
-          actor.continue(state)
+          pool_continue(state)
         }
       }
     }
@@ -364,26 +439,33 @@ fn handle_pool_message(
         <> reason,
       )
 
-      // Update stats
-      let new_stats =
-        PoolStats(..state.stats, total_failed: state.stats.total_failed + 1)
-
-      // Notify manager of failure
-      process.send(
-        state.manager_subject,
-        JobStatusUpdate(job_id, Failed(reason), None),
-      )
-
-      // Remove from busy workers
-      let new_busy = dict.delete(state.busy_workers, worker_id)
-
-      // Spawn a replacement worker since this one died
-      let new_state =
-        spawn_worker(
-          WorkerPoolState(..state, busy_workers: new_busy, stats: new_stats),
-        )
-
-      actor.continue(new_state)
+      case dict.get(state.busy_workers, worker_id) {
+        Error(_) -> pool_continue(state)
+        Ok(info) if info.job_id != job_id -> pool_continue(state)
+        Ok(info) if info.timeout_error == None -> {
+          // A failed download does not mean the worker actor failed. It has
+          // finished its request and is healthy, so keep the same process.
+          let new_stats =
+            PoolStats(..state.stats, total_failed: state.stats.total_failed + 1)
+          process.send(
+            state.manager_subject,
+            JobStatusUpdate(job_id, Failed(reason), None),
+          )
+          let new_state =
+            WorkerPoolState(
+              ..state,
+              available_workers: [info.worker, ..state.available_workers],
+              busy_workers: dict.delete(state.busy_workers, worker_id),
+              stats: new_stats,
+            )
+          case state.self {
+            Some(self) -> process.send(self, ProcessQueue)
+            None -> Nil
+          }
+          pool_continue(new_state)
+        }
+        _ -> pool_continue(state)
+      }
     }
 
     ScaleWorkers(target) -> {
@@ -401,7 +483,7 @@ fn handle_pool_message(
             <> int.to_string(clamped_target),
           )
           let new_state = spawn_workers(state, diff)
-          actor.continue(new_state)
+          pool_continue(new_state)
         }
         False -> {
           // Scale down (only remove available workers)
@@ -413,7 +495,10 @@ fn handle_pool_message(
 
               // Shutdown extra workers
               list.each(to_shutdown, fn(worker) {
-                process.send(worker, ShutdownWorker)
+                // Retirement is intentional; cancel the monitor before the
+                // worker exits so it cannot be mistaken for a crash.
+                process.demonitor_process(worker.monitor)
+                process.send(worker.subject, ShutdownWorker)
               })
 
               io.println(
@@ -425,7 +510,7 @@ fn handle_pool_message(
                 ),
               )
 
-              actor.continue(
+              pool_continue(
                 WorkerPoolState(
                   ..state,
                   available_workers: remaining,
@@ -434,7 +519,7 @@ fn handle_pool_message(
                 ),
               )
             }
-            False -> actor.continue(state)
+            False -> pool_continue(state)
           }
         }
       }
@@ -448,7 +533,7 @@ fn handle_pool_message(
             "worker-q-" <> int.to_string(state.worker_index + 1000)
 
           assign_work_to_worker(
-            worker,
+            worker.subject,
             worker_id,
             work.job_id,
             work.url,
@@ -464,7 +549,9 @@ fn handle_pool_message(
               WorkerInfo(
                 job_id: work.job_id,
                 worker: worker,
-                started_at: get_timestamp(),
+                started_at_ms: get_monotonic_time_ms(),
+                timeout_ms: work.config.download_timeout_ms,
+                timeout_error: None,
               ),
             )
 
@@ -479,23 +566,23 @@ fn handle_pool_message(
 
           // Continue processing queue if more work
           case rest_queue {
-            [] -> actor.continue(new_state)
+            [] -> pool_continue(new_state)
             _ -> {
               case state.self {
                 Some(self) -> process.send(self, ProcessQueue)
                 None -> Nil
               }
-              actor.continue(new_state)
+              pool_continue(new_state)
             }
           }
         }
-        _, _ -> actor.continue(state)
+        _, _ -> pool_continue(state)
       }
     }
 
     RateLimitedDispatch -> {
       // Handle rate-limited dispatch - try to dispatch queued work respecting rate limits
-      let current_time_ms = get_timestamp_ms()
+      let current_time_ms = get_monotonic_time_ms()
       let rate_limit_ms = state.config.rate_limit_delay_ms
       let time_since_last = current_time_ms - state.last_dispatch_ts
 
@@ -510,7 +597,7 @@ fn handle_pool_message(
             "worker-rl-" <> int.to_string(state.worker_index + 2000)
 
           assign_work_to_worker(
-            worker,
+            worker.subject,
             worker_id,
             work.job_id,
             work.url,
@@ -526,7 +613,9 @@ fn handle_pool_message(
               WorkerInfo(
                 job_id: work.job_id,
                 worker: worker,
-                started_at: get_timestamp(),
+                started_at_ms: get_monotonic_time_ms(),
+                timeout_ms: work.config.download_timeout_ms,
+                timeout_error: None,
               ),
             )
 
@@ -542,14 +631,14 @@ fn handle_pool_message(
 
           // Schedule next rate-limited dispatch if more work
           case rest_queue {
-            [] -> actor.continue(new_state)
+            [] -> pool_continue(new_state)
             _ -> {
               case state.self {
                 Some(self) ->
                   schedule_rate_limited_dispatch(self, rate_limit_ms)
                 None -> Nil
               }
-              actor.continue(new_state)
+              pool_continue(new_state)
             }
           }
         }
@@ -561,73 +650,71 @@ fn handle_pool_message(
             Some(self) -> schedule_rate_limited_dispatch(self, delay_needed)
             None -> Nil
           }
-          actor.continue(state)
+          pool_continue(state)
         }
 
         _, _, _ -> {
           // No work or no workers - nothing to do
-          actor.continue(state)
+          pool_continue(state)
         }
       }
     }
 
     HealthCheck -> {
-      // Check for stuck workers using configured timeout
-      let current_time = get_timestamp()
-      // Convert milliseconds to seconds
-      let timeout_threshold = state.config.download_timeout_ms / 1000
-
-      let stuck_workers =
-        dict.to_list(state.busy_workers)
-        |> list.filter(fn(entry) {
-          let #(_, info) = entry
-          current_time - info.started_at > timeout_threshold
-        })
-
-      // Handle stuck workers
+      // Mark timeout exactly once. The monitor DOWN handler owns settlement
+      // and replacement, so the worker slot remains occupied until it exits.
+      let current_time_ms = get_monotonic_time_ms()
       let new_state =
-        list.fold(stuck_workers, state, fn(st, entry) {
+        dict.to_list(state.busy_workers)
+        |> list.fold(state, fn(st, entry) {
           let #(worker_id, info) = entry
-          io.println(
-            "⚠️  Worker "
-            <> worker_id
-            <> " appears stuck on job "
-            <> job_id_to_string(info.job_id)
-            <> " (exceeded "
-            <> int.to_string(st.config.download_timeout_ms / 60_000)
-            <> " minute timeout)",
-          )
-
-          // Mark job as failed and remove from busy
-          process.send(
-            st.manager_subject,
-            JobStatusUpdate(
-              info.job_id,
-              Failed(
+          case
+            info.timeout_error == None
+            && current_time_ms - info.started_at_ms >= info.timeout_ms
+          {
+            True -> {
+              let reason =
                 "Download timeout exceeded "
-                <> int.to_string(st.config.download_timeout_ms / 60_000)
-                <> " minutes",
-              ),
-              None,
-            ),
-          )
-
-          // Try to shutdown the stuck worker
-          process.send(info.worker, ShutdownWorker)
-
-          WorkerPoolState(
-            ..st,
-            busy_workers: dict.delete(st.busy_workers, worker_id),
-          )
+                <> int.to_string(info.timeout_ms / 60_000)
+                <> " minutes"
+              io.println(
+                "⚠️  Worker "
+                <> worker_id
+                <> " timed out on job "
+                <> job_id_to_string(info.job_id),
+              )
+              // Confirm the old execution subtree and external command tree
+              // are stopped before the DOWN handler releases its capacity.
+              case st.factory {
+                Some(#(_, factory_pid)) ->
+                  stop_owned_worker(info.worker.pid, factory_pid)
+                None -> process.kill(info.worker.pid)
+              }
+              WorkerPoolState(
+                ..st,
+                busy_workers: dict.insert(
+                  st.busy_workers,
+                  worker_id,
+                  WorkerInfo(..info, timeout_error: Some(reason)),
+                ),
+              )
+            }
+            False -> st
+          }
         })
 
-      // Schedule next health check
-      case state.self {
-        Some(self) -> schedule_health_check(self)
+      case new_state.self {
+        Some(self) -> {
+          schedule_health_check(self)
+          case new_state.work_queue {
+            [] -> Nil
+            _ -> process.send(self, ProcessQueue)
+          }
+        }
         None -> Nil
       }
 
-      actor.continue(new_state)
+      pool_continue(new_state)
     }
 
     GetStatus(reply) -> {
@@ -640,20 +727,19 @@ fn handle_pool_message(
           stats: state.stats,
         )
       process.send(reply, status)
-      actor.continue(state)
+      pool_continue(state)
     }
 
     Shutdown -> {
       io.println("🛑 Worker pool shutting down...")
 
-      // Shutdown all workers
-      list.each(state.available_workers, fn(worker) {
-        process.send(worker, ShutdownWorker)
-      })
-
-      dict.each(state.busy_workers, fn(_, info) {
-        process.send(info.worker, ShutdownWorker)
-      })
+      // The factory owns the workers and shuts them down with itself. Killing
+      // it here also covers a normal pool stop (normal link exits do not
+      // propagate to linked processes).
+      case state.factory {
+        Some(#(_, factory_pid)) -> process.kill(factory_pid)
+        None -> Nil
+      }
 
       actor.stop()
     }
@@ -669,36 +755,136 @@ fn spawn_workers(state: WorkerPoolState, count: Int) -> WorkerPoolState {
 fn spawn_worker(state: WorkerPoolState) -> WorkerPoolState {
   let worker_id = "worker-" <> int.to_string(state.worker_index)
 
-  case start_worker(state.config, worker_id) {
-    Ok(worker_subject) -> {
-      io.println("🔧 Spawned worker: " <> worker_id)
-      WorkerPoolState(
-        ..state,
-        available_workers: [worker_subject, ..state.available_workers],
-        current_worker_count: state.current_worker_count + 1,
-        worker_index: state.worker_index + 1,
-      )
-    }
-    Error(_) -> {
-      io.println("❌ Failed to spawn worker: " <> worker_id)
-      state
-    }
+  case state.factory {
+    Some(#(factory, _)) ->
+      case
+        factory_supervisor.start_child(
+          factory,
+          WorkerArgs(state.config, worker_id, state.runner),
+        )
+      {
+        Ok(started) -> {
+          let worker =
+            Worker(
+              subject: started.data,
+              pid: started.pid,
+              monitor: process.monitor(started.pid),
+            )
+          io.println("🔧 Spawned worker: " <> worker_id)
+          WorkerPoolState(
+            ..state,
+            available_workers: [worker, ..state.available_workers],
+            current_worker_count: state.current_worker_count + 1,
+            worker_index: state.worker_index + 1,
+          )
+        }
+        Error(_) -> {
+          io.println("❌ Failed to spawn worker: " <> worker_id)
+          state
+        }
+      }
+    None -> state
   }
 }
 
-/// Start an individual worker actor
-fn start_worker(
-  config: ytdlp.DownloadConfig,
-  worker_id: String,
-) -> Result(Subject(WorkerMessage), actor.StartError) {
+fn start_factory_worker(
+  args: WorkerArgs,
+) -> actor.StartResult(Subject(WorkerMessage)) {
+  let WorkerArgs(config, worker_id, runner) = args
   let initial_state =
-    WorkerState(config: config, worker_id: worker_id, current_job: None)
+    WorkerState(config:, worker_id:, current_job: None, runner:)
 
   actor.start(
     actor.new(initial_state)
     |> actor.on_message(handle_worker_message),
   )
-  |> result.map(fn(started) { started.data })
+}
+
+/// Build the pool selector after each state transition. Actor continuations
+/// replace selectors, so every live worker monitor must be selected again.
+fn pool_continue(
+  state: WorkerPoolState,
+) -> actor.Next(WorkerPoolState, PoolMessage) {
+  let next = actor.continue(state)
+  case state.self {
+    Some(self) ->
+      actor.with_selector(
+        next,
+        process.new_selector()
+          |> process.select(self)
+          |> process.select_monitors(fn(down) { WorkerDown(down) }),
+      )
+    None -> next
+  }
+}
+
+fn handle_worker_down(
+  state: WorkerPoolState,
+  down: Down,
+) -> actor.Next(WorkerPoolState, PoolMessage) {
+  case down {
+    process.ProcessDown(_, pid, _) -> {
+      let available =
+        list.filter(state.available_workers, fn(worker) { worker.pid != pid })
+      let removed_available =
+        list.length(available) < list.length(state.available_workers)
+      let busy_match =
+        dict.to_list(state.busy_workers)
+        |> list.fold(None, fn(found, entry) {
+          case found {
+            Some(_) -> found
+            None -> {
+              let #(worker_id, info) = entry
+              case info.worker.pid == pid {
+                True -> Some(#(worker_id, info))
+                False -> None
+              }
+            }
+          }
+        })
+
+      case removed_available, busy_match {
+        False, None -> pool_continue(state)
+        _, _ -> {
+          let next_state = case busy_match {
+            Some(#(worker_id, info)) -> {
+              let reason = case info.timeout_error {
+                Some(timeout_reason) -> timeout_reason
+                None -> "Worker process exited unexpectedly"
+              }
+              process.send(
+                state.manager_subject,
+                JobStatusUpdate(info.job_id, Failed(reason), None),
+              )
+              WorkerPoolState(
+                ..state,
+                available_workers: available,
+                busy_workers: dict.delete(state.busy_workers, worker_id),
+                current_worker_count: int.max(state.current_worker_count - 1, 0),
+                stats: PoolStats(
+                  ..state.stats,
+                  total_failed: state.stats.total_failed + 1,
+                ),
+              )
+            }
+            None ->
+              WorkerPoolState(
+                ..state,
+                available_workers: available,
+                current_worker_count: int.max(state.current_worker_count - 1, 0),
+              )
+          }
+          let replaced = spawn_worker(next_state)
+          case replaced.self {
+            Some(self) -> process.send(self, ProcessQueue)
+            None -> Nil
+          }
+          pool_continue(replaced)
+        }
+      }
+    }
+    process.PortDown(_, _, _) -> pool_continue(state)
+  }
 }
 
 /// Handle worker messages
@@ -716,7 +902,7 @@ fn handle_worker_message(
       )
 
       // Execute the download with the submission's immutable config snapshot.
-      let result = execute_download_safely(job_id, url, config, manager)
+      let result = state.runner(job_id, url, config, manager)
 
       // Report back to pool
       case result {
@@ -759,18 +945,40 @@ fn execute_download_safely(
 
       // Wait with configurable timeout
       case process.receive(reply_subject, config.download_timeout_ms) {
-        Ok(result) -> Ok(result)
-        Error(_) ->
+        Ok(result) -> {
+          process.send(downloader_subject, downloader.Shutdown)
+          Ok(result)
+        }
+        Error(_) -> {
+          // The download actor owns the external command port. Kill that
+          // owner on timeout so its port guardian terminates the command tree.
+          stop_downloader(downloader_subject)
           Error(
             "Download timeout exceeded "
             <> int.to_string(config.download_timeout_ms / 60_000)
             <> " minutes",
           )
+        }
       }
     }
     Error(_) -> Error("Failed to start downloader actor")
   }
 }
+
+fn stop_downloader(subject: Subject(downloader.DownloaderMessage)) -> Nil {
+  case process.subject_owner(subject) {
+    Ok(pid) -> {
+      // The downloader was started linked to this worker. Unlink before the
+      // untrappable kill so its `killed` exit cannot take the worker with it.
+      process.unlink(pid)
+      process.kill(pid)
+    }
+    Error(_) -> Nil
+  }
+}
+
+@external(erlang, "subscription_manager_ffi", "stop_worker_owned")
+fn stop_owned_worker(worker: Pid, owner: Pid) -> Nil
 
 /// Assign work to a specific worker
 fn assign_work_to_worker(
@@ -800,12 +1008,8 @@ fn assign_work_to_worker(
 
 /// Schedule periodic health checks
 fn schedule_health_check(pool: Subject(PoolMessage)) -> Nil {
-  // Health check every 60 seconds
-  let _ =
-    process.spawn(fn() {
-      process.sleep(60_000)
-      process.send(pool, HealthCheck)
-    })
+  // A native timer does not allocate a sleeping helper process.
+  process.send_after(pool, 60_000, HealthCheck)
   Nil
 }
 
@@ -817,21 +1021,17 @@ fn verify_file_exists(path: String) -> Result(String, String) {
   }
 }
 
-/// Get current Unix timestamp in seconds
+/// Monotonic time is used for elapsed-time calculations, avoiding wall-clock
+/// jumps changing rate limiting or download deadlines.
 type TimeUnit {
-  Second
   Millisecond
 }
 
-@external(erlang, "erlang", "system_time")
-fn get_system_time(unit: TimeUnit) -> Int
+@external(erlang, "erlang", "monotonic_time")
+fn get_monotonic_time(unit: TimeUnit) -> Int
 
-fn get_timestamp() -> Int {
-  get_system_time(Second)
-}
-
-fn get_timestamp_ms() -> Int {
-  get_system_time(Millisecond)
+fn get_monotonic_time_ms() -> Int {
+  get_monotonic_time(Millisecond)
 }
 
 /// Schedule rate-limited dispatch after a delay
@@ -839,7 +1039,7 @@ fn schedule_rate_limited_dispatch(
   pool: Subject(PoolMessage),
   delay_ms: Int,
 ) -> Nil {
-  // Use BEAM's native timer for rate-limited dispatch
+  // Use BEAM's native timer rather than a sleeping helper process.
   process.send_after(pool, delay_ms, RateLimitedDispatch)
   Nil
 }

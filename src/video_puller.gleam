@@ -2,7 +2,7 @@
 ///
 /// Main entry point for the application. Implements a proper BEAM architecture:
 /// - Worker pool for massive parallel downloads
-/// - BEAM-native scheduling (no infinite recursion)
+/// - BEAM-native timer scheduling
 import core/service_supervisor
 import core/startup
 import engine/ytdlp
@@ -21,7 +21,7 @@ pub fn main() -> Nil {
   // Display BEAM optimization features
   io.println("🔧 BEAM Features Enabled:")
   io.println("   ✓ Supervised worker pool for parallel downloads")
-  io.println("   ✓ Native timer scheduling (no recursion)")
+  io.println("   ✓ Native timer scheduling")
   io.println("   ✓ Dynamic worker scaling")
   io.println("")
 
@@ -45,9 +45,7 @@ pub fn main() -> Nil {
           io.println("")
           io.println("✅ Application started under OTP supervision!")
           io.println("")
-          io.println(
-            "🚀 Ready to handle MASSIVE parallel downloads (500+ videos)",
-          )
+          io.println("🚀 Ready for bounded parallel downloads")
           io.println("")
           io.println("Press Ctrl+C to stop")
           process.sleep_forever()

@@ -1,6 +1,19 @@
 -module(service_supervisor_test_ffi).
 -export([supervisor_child/2, supervisor_child_by_type/2, exit_process/2,
-         stop_supervisor/1, wait_for_routes/2]).
+         stop_supervisor/1, wait_for_routes/2, initial_module/1, poll_guard_pid/0,
+         kill_poll_guard/0]).
+
+kill_poll_guard() ->
+    Pid = whereis(subscription_manager_poll_guard),
+    Monitor = erlang:monitor(process, Pid),
+    exit(Pid, kill),
+    receive {'DOWN', Monitor, process, Pid, _} -> nil after 1000 -> error(timeout) end.
+
+initial_module(Pid) ->
+    {Module, _, _} = proc_lib:translate_initial_call(Pid),
+    atom_to_binary(Module, utf8).
+
+poll_guard_pid() -> whereis(subscription_manager_poll_guard).
 
 supervisor_child(Supervisor, Id) ->
     case lists:keyfind(Id, 1, supervisor:which_children(Supervisor)) of
@@ -9,7 +22,7 @@ supervisor_child(Supervisor, Id) ->
     end.
 
 supervisor_child_by_type(Supervisor, Type) ->
-    Expected = case Type of "supervisor" -> supervisor; _ -> worker end,
+    Expected = case Type of <<"supervisor">> -> supervisor; _ -> worker end,
     case [Pid || {_Id, Pid, ChildType, _Modules} <- supervisor:which_children(Supervisor),
                  ChildType =:= Expected, is_pid(Pid)] of
         [Pid | _] -> {ok, Pid};

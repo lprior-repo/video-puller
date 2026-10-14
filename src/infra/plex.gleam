@@ -30,16 +30,13 @@ pub fn refresh_library() -> Nil {
 pub fn start_title_sync(
   library_dir: String,
   trash_cleanup: fn(String) -> Result(Bool, String),
-) -> Nil {
+) -> process.Pid {
   case envoy.get("PLEX_SECTION_ID") {
     Ok(section) if section != "" -> {
-      let _ =
-        process.spawn(fn() { title_sync_loop(library_dir, trash_cleanup, None) })
-      Nil
+      process.spawn(fn() { title_sync_loop(library_dir, trash_cleanup, None) })
     }
-    _ -> Nil
+    _ -> process.spawn(fn() { process.sleep_forever() })
   }
-  Nil
 }
 
 fn title_sync_loop(

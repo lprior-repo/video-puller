@@ -156,8 +156,17 @@ progress refresh. Grid requests never overlap and refresh after new completions
 or once per minute to pick up later Plex links and metadata updates.
 
 The application runs under an OTP `RestForOne` supervisor, ordered as storage
-guard, download manager and pool, named subscription actor, Mist HTTP
-supervisor, and Plex synchronizer. An upstream child failure restarts its
+guard, poll cleanup guardian, download manager and pool, named subscription
+actor, Mist HTTP supervisor, Plex synchronizer, and state backup worker.
+Storage, Plex sync, and backup work processes are direct supervisor children.
+Manual download workers belong to a factory supervisor under the pool, with
+temporary child specifications and pool-owned monitors. A worker crash fails
+its assigned job once and replaces that worker without restarting the HTTP
+server or subscription scheduler. Normal download errors reuse healthy workers;
+timeout replacement waits for worker death. The default manual pool honors
+`MAX_CONCURRENCY` (10), instead of silently allocating up to 500 workers.
+Pool deadlines and rate limiting use monotonic time and native BEAM timers.
+An upstream child failure restarts its
 dependent services; the web context resolves the replacement subscription
 actor through its stable name. Poll-worker monitors detect crashes immediately
 and schedule a five-minute retry. The download manager has a bounded mailbox
@@ -167,9 +176,24 @@ VM if the supervisor gives up. Startup reaps only fingerprint-verified orphan
 download processes before starting new work. The macOS LaunchAgent starts at
 login; FileVault still requires unlocking the Mac after a cold boot.
 
+The poll cleanup guardian is supervised and retains a bounded ownership journal
+within the VM, rebuilding its monitors after a guardian crash. A poll cannot
+start external work until ownership registration is acknowledged. Restarts
+wait for old worker and downloader cleanup before allowing another poll.
+
+Schema migrations and their version records commit together in one transaction,
+so failed or interrupted DDL cannot leave a partially applied tracked migration.
+The initial historical migration cannot downgrade `synchronous=FULL`.
+Completion-history writes sync the file and directory entries, including on
+retries where the ID is already visible; backup publication also syncs its
+directory before and after the final rename.
+
 The supervision integration test starts the actual application tree and kills
-the subscription actor and HTTP supervisor, verifying replacement actors and
-recovered HTTP routes while the upstream download service remains running.
+the subscription actor, actual HTTP supervisor, backup worker, and poll
+guardian. It verifies replacement processes, recovered HTTP routes, and which
+upstream services remain running. Further tests lose both a poll guardian and
+manager while real fixture downloader processes run, and verify those processes
+are stopped before a replacement manager starts.
 
 The Plex preset saves H.264/AAC MP4, the original video title, upload date,
 description, show/genre tags, chapter markers, artwork, episode thumbnails,

@@ -1,9 +1,23 @@
 -module(subscription_manager_ffi).
--export([stop_worker/1, await_previous_poll_cleanup/1, guard_poll_worker/3]).
+-export([stop_worker/1, await_previous_poll_cleanup/1, guard_poll_worker/3,
+         start_link/0, await_poll_start/0, release_poll_worker/1, stop_worker_owned/2]).
 
 -define(POLL_GUARD, subscription_manager_poll_guard).
+-define(POLL_OWNERS, {?MODULE, poll_owners}).
 
-%% A long-lived unlinked process owns the poll-worker monitors. When a manager
+await_poll_start() ->
+    receive subscription_poll_begin -> true after 15000 -> false end.
+
+release_poll_worker(Worker) -> Worker ! subscription_poll_begin, nil.
+
+%% The production supervisor adopts this guardian before any poll starts.
+start_link() ->
+    case ensure_poll_guard() of
+        {ok, Pid} -> link(Pid), {ok, Pid};
+        error -> {error, <<"poll guardian unavailable">>}
+    end.
+
+%% A supervisor-owned guardian owns the poll-worker monitors. When a manager
 %% dies, it stops the worker and its linked downloader tree before releasing
 %% the name. start_named/2 asks this process to clear old ownership first, so
 %% a RestForOne restart cannot overlap the previous poll's lock ownership.
@@ -22,16 +36,23 @@ await_previous_poll_cleanup(Name) ->
 
 guard_poll_worker(Name, Manager, Worker) ->
     case ensure_poll_guard() of
-        {ok, Guard} -> Guard ! {track, Name, Manager, Worker}, nil;
-        error -> nil
+        {ok, Guard} ->
+            Ref = make_ref(),
+            Guard ! {track, self(), Ref, Name, Manager, Worker},
+            receive {Ref, tracked} -> {ok, nil}
+            after 5000 -> {error, <<"poll guardian registration timed out">>}
+            end;
+        error -> {error, <<"poll guardian unavailable">>}
     end.
 
 ensure_poll_guard() ->
     case whereis(?POLL_GUARD) of
         undefined ->
-            Pid = spawn(fun() -> poll_guard_loop([]) end),
+            Pid = proc_lib:spawn(fun() ->
+                receive activate -> poll_guard_loop(restore_owners()) end
+            end),
             try register(?POLL_GUARD, Pid) of
-                true -> {ok, Pid}
+                true -> Pid ! activate, {ok, Pid}
             catch
                 error:badarg ->
                     exit(Pid, kill),
@@ -43,14 +64,36 @@ ensure_poll_guard() ->
         Pid -> {ok, Pid}
     end.
 
+%% Ownership survives a guardian crash within this VM. Rebuild monitors before
+%% serving restart requests; never forget an old poll merely because its
+%% monitor owner died. The journal contains at most the currently active polls.
+restore_owners() ->
+    lists:filtermap(fun({Name, Manager, Worker}) ->
+        case is_process_alive(Worker) of
+            false -> false;
+            true ->
+                OwnerRef = erlang:monitor(process, Manager),
+                WorkerRef = erlang:monitor(process, Worker),
+                {true, {Name, Manager, Worker, OwnerRef, WorkerRef}}
+        end
+    end, persistent_term:get(?POLL_OWNERS, [])).
+
+save_owners(Entries) ->
+    persistent_term:put(?POLL_OWNERS,
+        [{Name, Manager, Worker} || {Name, Manager, Worker, _, _} <- Entries]).
+
 poll_guard_loop(Entries) ->
+    save_owners(Entries),
     receive
-        {track, Name, Manager, Worker} ->
+        {track, From, Ref, Name, Manager, Worker} ->
             OwnerRef = erlang:monitor(process, Manager),
             WorkerRef = erlang:monitor(process, Worker),
-            poll_guard_loop([
+            Tracked = [
                 {Name, Manager, Worker, OwnerRef, WorkerRef} | Entries
-            ]);
+            ],
+            save_owners(Tracked),
+            From ! {Ref, tracked},
+            poll_guard_loop(Tracked);
         {await_clear, From, Ref, Name} ->
             Matching = [Entry || Entry = {EntryName, _, _, _, _} <- Entries, EntryName =:= Name],
             case lists:any(fun({_, Manager, _, _, _}) -> is_process_alive(Manager) end, Matching) of
@@ -109,8 +152,13 @@ find_entry(Predicate, [Entry | Rest]) ->
 %% Suspend the linked channel-worker tree before killing any OS processes.
 %% This also prevents linked children from opening new ports during cleanup.
 stop_worker(Worker) ->
+    stop_worker_owned(Worker, self()).
+
+%% A factory-supervised worker is linked to its supervisor. Do not walk into
+%% that ancestor when stopping the execution subtree and its external ports.
+stop_worker_owned(Worker, Owner) ->
     erlang:unlink(Worker),
-    Frozen = freeze_tree(Worker, [self()]),
+    Frozen = freeze_tree(Worker, [self(), Owner]),
     lists:foreach(fun({_Pid, _Ref, Ports}) ->
         lists:foreach(fun shell_ffi:kill_port_tree/1, Ports)
     end, Frozen),

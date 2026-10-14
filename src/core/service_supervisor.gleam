@@ -60,6 +60,10 @@ pub fn start(
   static_supervisor.new(static_supervisor.RestForOne)
   |> static_supervisor.restart_tolerance(intensity: 10, period: 60)
   |> static_supervisor.add(storage_child())
+  |> static_supervisor.add(
+    supervision.worker(subscription_manager.start_poll_guard)
+    |> supervision.timeout(ms: 15_000),
+  )
   |> static_supervisor.add(download_child(
     db,
     download_config,
@@ -133,33 +137,23 @@ fn subscription_child(
 
 fn plex_child() -> supervision.ChildSpecification(Nil) {
   supervision.worker(fn() {
-    actor.new_with_initialiser(15_000, fn(_subject) {
+    let pid =
       plex.start_title_sync(
         ytdl_sub.layout_from_env().library_dir,
         managed_trash.cleanup,
       )
-      Ok(actor.initialised(Nil))
-    })
-    |> actor.start
+    Ok(actor.Started(pid:, data: Nil))
   })
   |> supervision.timeout(ms: 15_000)
 }
 
 fn start_storage_wrapper() -> actor.StartResult(Nil) {
-  actor.new_with_initialiser(15_000, fn(_subject) {
-    storage_guard.start()
-    Ok(actor.initialised(Nil))
-  })
-  |> actor.start
+  Ok(actor.Started(pid: storage_guard.start(), data: Nil))
 }
 
 fn backup_child(db: Db) -> supervision.ChildSpecification(Nil) {
   supervision.worker(fn() {
-    actor.new_with_initialiser(15_000, fn(_subject) {
-      state_backup.start(db)
-      Ok(actor.initialised(Nil))
-    })
-    |> actor.start
+    Ok(actor.Started(pid: state_backup.start(db), data: Nil))
   })
   |> supervision.timeout(ms: 15_000)
 }

@@ -1,10 +1,56 @@
 /// Database initialization tests.
 import gleam/dynamic/decode
+import gleam/erlang/process
+import gleam/int
+import gleam/list
 import gleeunit
 import gleeunit/should
 import infra/db
 import simplifile
 import sqlight
+
+pub fn native_sqlite_serialized_mode_handles_concurrent_actor_writes_test() {
+  let path = "/tmp/test_db_concurrent_actors.db"
+  remove_database(path)
+  let conn = db.init_db(path) |> should.be_ok()
+  sqlight.query(
+    "SELECT sqlite_compileoption_used('THREADSAFE=1')",
+    conn,
+    [],
+    decode.at([0], decode.int),
+  )
+  |> should.equal(Ok([1]))
+  db.exec_raw(conn, "CREATE TABLE concurrent_probe (id INTEGER PRIMARY KEY)")
+  |> should.be_ok()
+  let done = process.new_subject()
+  list.each(list.range(0, 5), fn(worker) {
+    let _ =
+      process.spawn_unlinked(fn() {
+        let outcome =
+          list.try_each(list.range(0, 19), fn(index) {
+            db.exec_raw(
+              conn,
+              "INSERT INTO concurrent_probe VALUES ("
+                <> int.to_string(worker * 20 + index)
+                <> ")",
+            )
+          })
+        process.send(done, outcome)
+      })
+  })
+  list.each(list.range(0, 5), fn(_) {
+    process.receive(done, 10_000) |> should.equal(Ok(Ok(Nil)))
+  })
+  sqlight.query(
+    "SELECT COUNT(*) FROM concurrent_probe",
+    conn,
+    [],
+    decode.at([0], decode.int),
+  )
+  |> should.equal(Ok([120]))
+  db.close(conn) |> should.be_ok()
+  remove_database(path)
+}
 
 pub fn main() {
   gleeunit.main()

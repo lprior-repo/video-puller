@@ -4,7 +4,7 @@
 /// shared between worker_pool.gleam and types.gleam without creating import cycles.
 import domain/core_types.{type DownloadResult, type JobId}
 import engine/ytdlp.{type DownloadConfig}
-import gleam/erlang/process.{type Subject}
+import gleam/erlang/process.{type Down, type Subject}
 
 /// Pool statistics for adaptive scaling
 pub type PoolStats {
@@ -34,6 +34,8 @@ pub type PoolMessage {
   WorkerDone(worker_id: String, job_id: JobId, result: DownloadResult)
   // Worker failed/crashed
   WorkerFailed(worker_id: String, job_id: JobId, reason: String)
+  // A monitored worker process exited (including an intentional retirement).
+  WorkerDown(down: Down)
   // Scale workers up/down
   ScaleWorkers(target: Int)
   // Get pool status

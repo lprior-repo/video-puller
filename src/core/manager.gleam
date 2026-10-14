@@ -59,7 +59,15 @@ pub fn start(
   poll_interval_ms: Int,
   max_concurrency: Int,
 ) -> Result(Subject(ManagerMessage), actor.StartError) {
-  start_with_workers(db, config, poll_interval_ms, max_concurrency, 20, 500)
+  let limit = int.max(max_concurrency, 1)
+  start_with_workers(
+    db,
+    config,
+    poll_interval_ms,
+    limit,
+    int.min(20, limit),
+    limit,
+  )
 }
 
 /// Start the manager actor with custom worker pool settings
