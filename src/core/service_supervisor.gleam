@@ -119,7 +119,7 @@ fn subscription_child(
     case subscription_repo.get_config(db) {
       Ok(config) ->
         case config.enabled && poll_on_start() {
-          True -> process.send(subject, subscription_manager.Poll)
+          True -> process.send(subject, subscription_manager.Resume)
           False -> Nil
         }
       _ -> Nil

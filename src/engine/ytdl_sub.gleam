@@ -1,8 +1,8 @@
 /// ytdl-sub engine wrapper
 ///
 /// Wraps the `ytdl-sub` subscription downloader so the application can pull
-/// public channel URLs without browser cookies, sequentially, on the
-/// application's own polling schedule.
+/// public channel URLs on the application's own polling schedule, with
+/// conservative pacing and optional explicitly configured local session cookies.
 import domain/subscription_types.{type DiscoveredVideo, DiscoveredVideo}
 import engine/download_history
 import engine/media_info
@@ -10,7 +10,9 @@ import engine/shell
 import engine/subscription_metadata
 import engine/subscription_pool
 import engine/subscription_progress
+import engine/subscription_recovery
 import engine/subscription_settings
+import engine/youtube_request_options
 import envoy
 import gleam/dict.{type Dict}
 import gleam/int
@@ -755,7 +757,10 @@ fn subscriptions_content(
   <> subscription_metadata.restricted_filter_block(
     subscription_settings.load().skip_restricted,
   )
-  <> ytdl_options_block(ytdl_options)
+  <> ytdl_options_block(list.append(
+    ytdl_options,
+    youtube_request_options.from_env(),
+  ))
   <> "\n"
   <> "Plex TV Show by Date:\n"
   <> "  = YouTube:\n"
@@ -1158,7 +1163,7 @@ pub fn run_pull_with_progress(
           let serial_jobs = list.filter(jobs, fn(job) { job.2 })
           let parallel_jobs = list.filter(jobs, fn(job) { !job.2 })
           let outcomes =
-            subscription_pool.run_ordered(
+            subscription_pool.run_ordered_with_stop(
               serial_jobs,
               parallel_jobs,
               workers,
@@ -1177,6 +1182,12 @@ pub fn run_pull_with_progress(
                 )
               },
               finished,
+              fn(outcome) {
+                subscription_recovery.blocks_remaining_jobs(case outcome {
+                  Ok(summary) -> summary.errors
+                  Error(message) -> [message]
+                })
+              },
             )
           subscription_progress.close_phase(
             layout.root,
@@ -1309,7 +1320,7 @@ fn run_single(
         worker_key,
         config_file,
         subscriptions_file,
-        timeout_ms,
+        int.min(timeout_ms, channel_timeout_ms()),
       )
   }
 }
@@ -1382,6 +1393,16 @@ fn phase_name(subscriptions_file: String) -> String {
     True -> "recent"
     False -> "backfill"
   }
+}
+
+/// A single stalled channel must not consume the entire multi-hour poll.
+fn channel_timeout_ms() -> Int {
+  envoy.get("CHANNEL_TIMEOUT_MINUTES")
+  |> result.unwrap("10")
+  |> int.parse
+  |> result.unwrap(10)
+  |> int.clamp(1, 60)
+  |> fn(minutes) { minutes * 60_000 }
 }
 
 fn worker_key(config_file: String) -> String {

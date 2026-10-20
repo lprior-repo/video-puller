@@ -126,12 +126,17 @@ class InstallerTests(unittest.TestCase):
         (self.source / "build/erlang-shipment/entrypoint.sh").write_text("new release\n")
         (self.source / "priv/static").mkdir(parents=True)
         (self.source / "priv/static/app.css").write_text("new static asset\n")
+        (self.source / "deploy/macos").mkdir(parents=True)
+        shutil.copy2(DEPLOY / "macos/export_youtube_session.py", self.source / "deploy/macos/export_youtube_session.py")
         self.install = self.root / "install & <app>"
         self.data = self.root / "data & <media>"
         self.plists = self.root / "agents"
         self.plist = self.plists / "local.video-puller.plist"
         self.log = self.root / "commands.jsonl"
         self.env = os.environ.copy()
+        for key in ("YOUTUBE_COOKIE_FILE", "YOUTUBE_SESSION_BROWSER", "YOUTUBE_SESSION_PYTHON", "YOUTUBE_SESSION_HELPER", "SUBSCRIPTION_BACKFILL"):
+            self.env.pop(key, None)
+        self.env.pop("SUBSCRIPTION_WORKERS", None)
         for key in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"):
             self.env.pop(key, None)
         self.env.update({
@@ -173,7 +178,7 @@ class InstallerTests(unittest.TestCase):
         installer = self.root / "linux-install.sh"
         installer.write_text(script)
         (self.root / "systemd").mkdir()
-        (self.source / "deploy").mkdir()
+        (self.source / "deploy").mkdir(exist_ok=True)
         shutil.copy2(DEPLOY / "video-puller.service", self.source / "deploy/video-puller.service")
         self.env.update({"TEST_LINUX": "1", "TEST_DATA_DIR": str(self.data)})
         result = subprocess.run([BASH, str(installer)], cwd=self.source, env=self.env, text=True, capture_output=True, timeout=15)
@@ -191,6 +196,13 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(plist["ProgramArguments"], [str(self.install / "build/erlang-shipment/entrypoint.sh"), "run"])
         self.assertEqual(plist["EnvironmentVariables"]["DATA_DIR"], str(self.data))
         self.assertEqual(plist["EnvironmentVariables"]["DB_PATH"], str(self.data / "video_eater.db"))
+        self.assertEqual(plist["EnvironmentVariables"]["SUBSCRIPTION_WORKERS"], "1")
+        self.assertEqual(plist["EnvironmentVariables"]["YOUTUBE_COOKIE_FILE"], "")
+        self.assertEqual(plist["EnvironmentVariables"]["YOUTUBE_SESSION_BROWSER"], "")
+        self.assertEqual(plist["EnvironmentVariables"]["YOUTUBE_SESSION_HELPER"], str(self.install / "bin/export-youtube-session.py"))
+        helper = self.install / "bin/export-youtube-session.py"
+        self.assertEqual(helper.read_bytes(), (DEPLOY / "macos/export_youtube_session.py").read_bytes())
+        self.assert_mode(helper, 0o700)
         self.assertEqual(plist["EnvironmentVariables"]["STATE_BACKUP_DIR"], str(Path(self.env["HOME"]) / "Library/Application Support/video-puller/state-backups"))
         self.assertEqual(plist["StandardOutPath"], str(self.data / "logs/video-puller.log"))
         self.assertIn(["brew", "install", "yt-dlp"], self.commands())
@@ -201,6 +213,47 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         with self.plist.open("rb") as source:
             self.assertEqual(plistlib.load(source)["WorkingDirectory"], str(self.install))
+
+    def test_macos_cookie_path_is_preserved_in_generated_plist(self):
+        self.env["YOUTUBE_COOKIE_FILE"] = str(self.root / "private & <session>/youtube.cookies.txt")
+        result = self.run_macos()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with self.plist.open("rb") as source:
+            self.assertEqual(plistlib.load(source)["EnvironmentVariables"]["YOUTUBE_COOKIE_FILE"], self.env["YOUTUBE_COOKIE_FILE"])
+
+    @unittest.skipUnless(Path("/usr/libexec/PlistBuddy").exists(), "macOS plist reader")
+    def test_macos_upgrade_keeps_existing_explicit_session_path(self):
+        self.plists.mkdir()
+        settings = {"YOUTUBE_COOKIE_FILE": str(self.root / "private/youtube.cookies.txt"),
+                    "YOUTUBE_SESSION_BROWSER": "chrome", "YOUTUBE_SESSION_PYTHON": str(self.root / "python & <runtime>"),
+                    "YOUTUBE_SESSION_HELPER": str(self.root / "session helper.py"), "SUBSCRIPTION_BACKFILL": "false"}
+        previous = {"EnvironmentVariables": settings}
+        self.plist.write_bytes(plistlib.dumps(previous))
+        result = self.run_macos()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with self.plist.open("rb") as source:
+            installed = plistlib.load(source)["EnvironmentVariables"]
+        for key, value in settings.items():
+            self.assertEqual(installed[key], value)
+
+    def test_macos_incomplete_automatic_refresh_does_not_replace_existing_agent(self):
+        self.plists.mkdir()
+        self.plist.write_text("existing launch agent")
+        self.env["YOUTUBE_SESSION_BROWSER"] = "chrome"
+        self.env["YOUTUBE_COOKIE_FILE"] = str(self.root / "youtube.cookies.txt")
+        result = self.run_macos()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Automatic session refresh requires", result.stdout)
+        self.assertEqual(self.plist.read_text(), "existing launch agent")
+
+    def test_macos_explicit_empty_browser_disables_automatic_refresh_on_upgrade(self):
+        self.plists.mkdir()
+        self.plist.write_bytes(plistlib.dumps({"EnvironmentVariables": {"YOUTUBE_SESSION_BROWSER": "chrome"}}))
+        self.env["YOUTUBE_SESSION_BROWSER"] = ""
+        result = self.run_macos()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        installed = plistlib.loads(self.plist.read_bytes())["EnvironmentVariables"]
+        self.assertEqual(installed["YOUTUBE_SESSION_BROWSER"], "")
 
     def test_macos_prebuilt_upgrade_uses_existing_release_without_git_or_build(self):
         (self.install / "build/erlang-shipment").mkdir(parents=True)

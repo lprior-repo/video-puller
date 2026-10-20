@@ -10,9 +10,11 @@ import domain/subscription_types.{
 import domain/types
 import engine/channel_import.{ImportSummary}
 import engine/nfo
+import engine/recovery_store
 import engine/shell
 import engine/subscription_progress
 import engine/subscription_settings
+import engine/youtube_session
 import engine/ytdl_sub
 import engine/ytdlp
 import envoy
@@ -54,6 +56,15 @@ pub fn health(_req: Request, ctx: Context) -> Response {
             }),
           ),
           #("database", json.string("connected")),
+          #("downloads", recovery_store.to_json(recovery_store.load())),
+          #("youtube_session", json.string(youtube_session.status())),
+          #(
+            "auto_download_enabled",
+            json.bool(case subscription_repo.get_config(ctx.db) {
+              Ok(config) -> config.enabled
+              Error(_) -> False
+            }),
+          ),
           #(
             "scheduler",
             json.string(case ctx.subscription_manager, scheduler_ok {

@@ -15,8 +15,9 @@ pub fn recent_preset_keeps_metadata_and_requests_english_srt_test() {
   block |> string.contains("subtitles_type: srt") |> should.be_true()
   block |> string.contains("embed_subtitles: True") |> should.be_true()
   block
-  |> string.contains("languages: [\"en.*\", \".*-orig\"]")
+  |> string.contains("languages: [\"en.*\"]")
   |> should.be_true()
+  block |> string.contains("\".*-orig\"") |> should.be_false()
   block
   |> string.contains("allow_auto_generated_subtitles: True")
   |> should.be_true()

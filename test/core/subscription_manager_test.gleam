@@ -3,6 +3,7 @@ import core/subscription_manager.{type SubscriptionMessage}
 import domain/subscription_types.{
   type SubscriptionConfig, type SubscriptionStatus, SubscriptionConfig,
 }
+import engine/recovery_store
 import engine/shell
 import engine/ytdl_sub
 import envoy
@@ -268,6 +269,123 @@ pub fn successful_partial_poll_keeps_regular_cadence_test() {
   let assert Some(result) = finished.last_result
   result.errors |> should.equal(["one private video was skipped"])
   cleanup(subject, conn, path)
+}
+
+pub fn partial_success_with_recoverable_errors_automatically_retries_test() {
+  let #(conn, path) = setup("automatic_partial_retry")
+  let called = process.new_subject()
+  let runner = fn() {
+    let outcomes = process.new_subject()
+    process.send(called, outcomes)
+    let assert Ok(outcome) = process.receive(outcomes, 1000)
+    outcome
+  }
+  let subject =
+    subscription_manager.start_with_retry_runner(conn, runner, 30_000, 1000)
+    |> should.be_ok()
+  process.send(subject, subscription_manager.UpdateConfig(config(True)))
+  process.send(subject, subscription_manager.Poll)
+  let first = process.receive(called, 1000) |> should.be_ok()
+  process.send(
+    first,
+    Ok(
+      ytdl_sub.PullSummary(0, [], [
+        "Sign in to confirm you're not a bot",
+      ]),
+    ),
+  )
+  // No manual trigger: the error-bearing Ok result must schedule this retry.
+  let second = process.receive(called, 3000) |> should.be_ok()
+  process.send(second, Ok(ytdl_sub.PullSummary(0, [], [])))
+  wait_for_completion(subject, 100)
+  let finished = status(subject)
+  let assert Some(result) = finished.last_result
+  result.errors |> should.equal([])
+  let assert Some(last) = finished.last_poll_at
+  let assert Some(next) = finished.next_poll_at
+  { next - last > 20_000 } |> should.be_true()
+  cleanup(subject, conn, path)
+}
+
+pub fn crashed_worker_automatically_retries_and_recovers_test() {
+  let #(conn, path) = setup("automatic_crash_retry")
+  let called = process.new_subject()
+  let runner = fn() {
+    let outcomes = process.new_subject()
+    process.send(called, outcomes)
+    let assert Ok(crash) = process.receive(outcomes, 1000)
+    case crash {
+      True -> panic as "injected first-attempt crash"
+      False -> Ok(ytdl_sub.PullSummary(0, [], []))
+    }
+  }
+  let subject =
+    subscription_manager.start_with_retry_runner(conn, runner, 30_000, 1000)
+    |> should.be_ok()
+  process.send(subject, subscription_manager.UpdateConfig(config(True)))
+  process.send(subject, subscription_manager.Poll)
+  let first = process.receive(called, 1000) |> should.be_ok()
+  process.send(first, True)
+  let second = process.receive(called, 3000) |> should.be_ok()
+  process.send(second, False)
+  wait_for_completion(subject, 100)
+  let assert Some(result) = status(subject).last_result
+  result.errors |> should.equal([])
+  cleanup(subject, conn, path)
+}
+
+pub fn restart_preserves_backoff_and_resumes_without_manual_poll_test() {
+  let #(conn, path) = setup("restart_retry")
+  let root = new_pid_file() <> "-retry-state"
+  let old_data_dir = envoy.get("DATA_DIR")
+  let _ = set_env("DATA_DIR", root)
+  let failed =
+    subscription_manager.start_with_retry_runner(
+      conn,
+      fn() { Error("network unavailable") },
+      30_000,
+      3000,
+    )
+    |> should.be_ok()
+  process.send(failed, subscription_manager.UpdateConfig(config(True)))
+  process.send(failed, subscription_manager.Poll)
+  wait_for_completion(failed, 100)
+  let persisted = recovery_store.load()
+  persisted.failures |> should.equal(1)
+  process.send(failed, subscription_manager.Shutdown)
+  process.sleep(50)
+
+  let called = process.new_subject()
+  let resumed =
+    subscription_manager.start_with_retry_runner(
+      conn,
+      fn() {
+        process.send(called, Nil)
+        Ok(ytdl_sub.PullSummary(0, [], []))
+      },
+      30_000,
+      3000,
+    )
+    |> should.be_ok()
+  process.send(resumed, subscription_manager.Resume)
+  process.receive(called, 100) |> should.be_error()
+  status(resumed).next_poll_at |> should.equal(Some(persisted.retry_at))
+  process.receive(called, 4000) |> should.be_ok()
+  wait_for_completion(resumed, 100)
+  recovery_store.load().status |> should.equal("healthy")
+  recovery_store.load().failures |> should.equal(0)
+  cleanup(resumed, conn, path)
+  case old_data_dir {
+    Ok(value) -> {
+      let _ = set_env("DATA_DIR", value)
+      Nil
+    }
+    Error(_) -> {
+      let _ = unset_env("DATA_DIR")
+      Nil
+    }
+  }
+  let _ = delete_tree(root)
 }
 
 type PollStarted {

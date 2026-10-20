@@ -147,6 +147,71 @@ pub fn run_deadline_preserves_partial_results_and_stops_shell_test() {
   descendant_stopped(marker) |> should.be_true()
 }
 
+pub fn shared_failure_stops_serial_and_pending_parallel_jobs_test() {
+  let started = process.new_subject()
+  let results =
+    subscription_pool.run_ordered_with_stop(
+      [1, 2],
+      [3, 4],
+      2,
+      3000,
+      fn(job, _) {
+        process.send(started, job)
+        Error("blocked session")
+      },
+      fn(_) { Nil },
+      fn(result) { result == Error("blocked session") },
+    )
+  results |> should.equal([Error("blocked session")])
+  process.receive(started, 1000) |> should.equal(Ok(1))
+  process.receive(started, 50) |> should.be_error()
+}
+
+pub fn shared_failure_drains_running_workers_before_returning_test() {
+  let slow = process.new_subject()
+  let blocked = process.new_subject()
+  let complete = process.new_subject()
+  let queued = process.new_subject()
+  let _ =
+    process.spawn_unlinked(fn() {
+      let results =
+        subscription_pool.run_with_stop(
+          [1, 2, 3],
+          2,
+          5000,
+          fn(job, _) {
+            case job {
+              1 -> {
+                let release = process.new_subject()
+                process.send(blocked, release)
+                let _ = process.receive(release, 3000)
+                Error("blocked session")
+              }
+              2 -> {
+                process.send(slow, process.self())
+                process.sleep(30_000)
+                Ok(job)
+              }
+              _ -> {
+                process.send(queued, Nil)
+                Ok(job)
+              }
+            }
+          },
+          fn(_) { Nil },
+          fn(result) { result == Error("blocked session") },
+        )
+      process.send(complete, results)
+    })
+  let pid = process.receive(slow, 2000) |> should.be_ok()
+  let release = process.receive(blocked, 2000) |> should.be_ok()
+  process.send(release, Nil)
+  process.receive(complete, 2000)
+  |> should.equal(Ok([Error("blocked session")]))
+  process.is_alive(pid) |> should.be_false()
+  process.receive(queued, 50) |> should.be_error()
+}
+
 @external(erlang, "shell_test_ffi", "new_pid_file")
 fn new_pid_file() -> String
 

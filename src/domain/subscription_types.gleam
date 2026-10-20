@@ -1,7 +1,7 @@
 /// Domain types for the subscription auto-download feature
 ///
 /// The subscription feature drives the ytdl-sub engine over a list of public
-/// channel URLs; it never reads browser cookies.
+/// channel URLs; optional local session configuration belongs to the engine.
 import gleam/option.{type Option, None}
 
 /// Subscription feature configuration

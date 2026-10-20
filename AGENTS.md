@@ -8,8 +8,19 @@ See `.claude/CLAUDE.md` for detailed Gleam development guidelines, code style, a
 
 ## Subscription Engine (ytdl-sub, Takeout, Plex)
 
-Subscriptions are pulled by `ytdl-sub` from public channel URLs — no browser
-cookies and no account access at any point.
+Subscriptions are pulled by `ytdl-sub` from public channel URLs and use anonymous
+requests by default. An explicitly authorized local session may be supplied with
+`YOUTUBE_COOKIE_FILE`. After explicit authorization, `YOUTUBE_SESSION_BROWSER`
+opts into refreshing that local session before unattended polls. Without that
+opt-in, never read a browser profile. Never print or upload cookie values, or
+commit session files. Keep the cookie file private (mode 0600) outside the
+repository. A failed refresh preserves the last export; failures retry with
+persisted exponential backoff from five minutes up to one hour.
+
+The default is one subscription worker, with one-second extraction-request
+pauses and randomized five-to-ten-second download pauses. Caption selection is
+English only (`en.*`, including `en-orig`); do not use `.*-orig`, which fetches
+tracks from many translated audio languages and can exhaust the poll deadline.
 
 - **Channel list**: `${DATA_DIR:-./data}/ytdl-sub/channels.txt`, one channel per
   line — either a URL or `Display Name = URL` — `#` comments allowed; seeded
@@ -56,6 +67,14 @@ cookies and no account access at any point.
   Cold-cache channel lookups share a bounded preparation budget. Duplicate
   display labels receive unique suffixes before rotation; missing lookup IDs
   never merge unrelated subscriptions.
+  Set `SUBSCRIPTION_BACKFILL=false` to run only the recent pass. Each channel
+  has a bounded `CHANNEL_TIMEOUT_MINUTES` (default 10, range 1–60) so one
+  stalled source cannot consume the entire poll. Authentication and rate-limit
+  failures stop pending requests and skip backfill. Partial download errors
+  must trigger retries, even when the engine returns `Ok` with completed files.
+  Preserve the retry deadline across restarts; startup sends `Resume`, whereas
+  a human-triggered `Poll` may bypass the delay. `/health` reports process and
+  download-workflow health separately.
 
 ### Idempotency guarantees
 

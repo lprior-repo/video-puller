@@ -9,7 +9,10 @@ import domain/subscription_types.{
   SubscriptionConfig, SubscriptionStatus,
 }
 import engine/channel_import
+import engine/recovery_store
+import engine/subscription_recovery
 import engine/takeout
+import engine/youtube_session
 import engine/ytdl_sub
 import envoy
 import gleam/erlang/process.{
@@ -30,6 +33,8 @@ import infra/subscription_repo
 pub type SubscriptionMessage {
   /// Trigger an immediate poll
   Poll
+  /// Resume unattended work, respecting a persisted retry deadline.
+  Resume
   /// Apply a new desired channel list, stopping outdated workers first.
   ReloadChannels
   /// Internal: converge changes made to the persisted desired file.
@@ -84,6 +89,8 @@ pub opaque type SubscriptionState {
     run_poll: fn() -> Result(ytdl_sub.PullSummary, String),
     watchdog_ms: Int,
     reconcile_pending: Bool,
+    recovery: subscription_recovery.State,
+    retry_base_ms: Int,
   )
 }
 
@@ -149,11 +156,37 @@ pub fn start_with_runner(
   start_with_runner_internal(db, run_poll, watchdog_ms, None)
 }
 
+/// Explicit retry clock for deterministic actor recovery tests.
+pub fn start_with_retry_runner(
+  db: Db,
+  run_poll: fn() -> Result(ytdl_sub.PullSummary, String),
+  watchdog_ms: Int,
+  retry_base_ms: Int,
+) -> Result(Subject(SubscriptionMessage), actor.StartError) {
+  start_with_policy(db, run_poll, watchdog_ms, None, retry_base_ms)
+}
+
 fn start_with_runner_internal(
   db: Db,
   run_poll: fn() -> Result(ytdl_sub.PullSummary, String),
   watchdog_ms: Int,
   poll_guard_name: Option(Name(SubscriptionMessage)),
+) -> Result(Subject(SubscriptionMessage), actor.StartError) {
+  start_with_policy(
+    db,
+    run_poll,
+    watchdog_ms,
+    poll_guard_name,
+    retry_delay_ms(),
+  )
+}
+
+fn start_with_policy(
+  db: Db,
+  run_poll: fn() -> Result(ytdl_sub.PullSummary, String),
+  watchdog_ms: Int,
+  poll_guard_name: Option(Name(SubscriptionMessage)),
+  retry_base_ms: Int,
 ) -> Result(Subject(SubscriptionMessage), actor.StartError) {
   let config = case subscription_repo.get_config(db) {
     Ok(c) -> c
@@ -179,6 +212,8 @@ fn start_with_runner_internal(
       run_poll: run_poll,
       watchdog_ms: int.max(watchdog_ms, 1),
       reconcile_pending: False,
+      recovery: recovery_store.load(),
+      retry_base_ms: int.clamp(retry_base_ms, 1000, 3_600_000),
     )
 
   let builder =
@@ -202,6 +237,20 @@ fn handle_message(
   message: SubscriptionMessage,
 ) -> actor.Next(SubscriptionState, SubscriptionMessage) {
   case message {
+    Resume -> {
+      case state.config.enabled, state.is_polling {
+        True, False ->
+          case state.recovery.retry_at > get_timestamp() {
+            True ->
+              actor.continue(arm_next_poll_after(
+                state,
+                int.min(state.recovery.retry_at - get_timestamp(), 3600) * 1000,
+              ))
+            False -> start_poll(disarm_timer(state))
+          }
+        _, _ -> actor.continue(state)
+      }
+    }
     CheckDesiredChannels -> {
       case state.self {
         Some(subject) -> {
@@ -440,13 +489,23 @@ fn finish_poll(
         Ok(_) -> False
         Error(_) -> state.reconcile_pending
       },
+      recovery: subscription_recovery.complete(
+        state.recovery,
+        poll_result.errors,
+        timestamp,
+        state.retry_base_ms,
+      ),
     )
 
   let finished_state = disarm_watchdog(finished_state)
-  case outcome {
-    Ok(_) -> actor.continue(arm_next_poll(finished_state))
-    Error(_) ->
-      actor.continue(arm_next_poll_after(finished_state, retry_delay_ms()))
+  recovery_store.save(finished_state.recovery)
+  case finished_state.recovery.failures > 0 {
+    False -> actor.continue(arm_next_poll(finished_state))
+    True ->
+      actor.continue(arm_next_poll_after(
+        finished_state,
+        int.max(finished_state.recovery.retry_at - timestamp, 1) * 1000,
+      ))
   }
 }
 
@@ -458,6 +517,8 @@ fn run_pull_worker(db: Db) -> Result(ytdl_sub.PullSummary, String) {
   }
   let deadline = monotonic_milliseconds() + effective_pull_timeout_ms(interval)
   let layout = ytdl_sub.layout_from_env()
+
+  use _ <- result.try(youtube_session.refresh())
 
   use _ <- result.try(
     ytdl_sub.ensure_layout(layout)
@@ -514,24 +575,35 @@ fn run_poll_phases(
     )
   log_pass("recent", recent)
 
-  let backfill = case remaining_poll_time(deadline) {
-    Error(err) -> Error("backfill pass: " <> err)
-    Ok(backfill_ms) -> {
-      io.println(
-        "Poll pass 2/2 - backfill: up to "
-        <> int.to_string(backfill_ms / 60_000)
-        <> " min",
-      )
-      label_pass(
-        "backfill pass",
-        ytdl_sub.run_pull_with_progress(
-          layout,
-          layout.subscriptions_file,
-          backfill_ms,
-          fn(_) { update_library_progress(db, layout.library_dir) },
-        ),
-      )
-    }
+  let recent_errors = case recent {
+    Ok(summary) -> summary.errors
+    Error(message) -> [message]
+  }
+  let backfill = case
+    backfill_enabled(),
+    subscription_recovery.blocks_remaining_jobs(recent_errors)
+  {
+    False, _ | _, True -> Ok(ytdl_sub.PullSummary(0, [], []))
+    True, False ->
+      case remaining_poll_time(deadline) {
+        Error(err) -> Error("backfill pass: " <> err)
+        Ok(backfill_ms) -> {
+          io.println(
+            "Poll pass 2/2 - backfill: up to "
+            <> int.to_string(backfill_ms / 60_000)
+            <> " min",
+          )
+          label_pass(
+            "backfill pass",
+            ytdl_sub.run_pull_with_progress(
+              layout,
+              layout.subscriptions_file,
+              backfill_ms,
+              fn(_) { update_library_progress(db, layout.library_dir) },
+            ),
+          )
+        }
+      }
   }
   log_pass("backfill", backfill)
 
@@ -734,6 +806,10 @@ fn effective_pull_timeout_ms(interval_minutes: Int) -> Int {
 fn start_poll(
   state: SubscriptionState,
 ) -> actor.Next(SubscriptionState, SubscriptionMessage) {
+  let recovery =
+    subscription_recovery.State(..state.recovery, status: "running")
+  recovery_store.save(recovery)
+  let state = SubscriptionState(..state, recovery: recovery)
   log_poll_start()
   case state.self {
     Some(self) -> {
@@ -830,7 +906,10 @@ fn arm_next_poll(state: SubscriptionState) -> SubscriptionState {
   let minutes = safe_minutes(state.config.poll_interval_minutes)
   let now = get_timestamp()
   let started_at = option.unwrap(state.poll_started_at, now)
-  let delay = next_poll_delay(started_at, now, minutes)
+  let delay = case state.recovery.failures > 0 {
+    True -> int.clamp(state.recovery.retry_at - now, 1, 3600)
+    False -> next_poll_delay(started_at, now, minutes)
+  }
   arm_next_poll_after_disarmed(state, delay * 1000)
 }
 
@@ -879,6 +958,13 @@ pub fn next_poll_delay(
 
 fn retry_delay_ms() -> Int {
   5 * 60 * 1000
+}
+
+fn backfill_enabled() -> Bool {
+  case envoy.get("SUBSCRIPTION_BACKFILL") {
+    Ok("false") | Ok("0") | Ok("no") -> False
+    _ -> True
+  }
 }
 
 /// Stop downloads before making the poll slot available to another worker.

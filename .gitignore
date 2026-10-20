@@ -15,10 +15,14 @@ erl_crash.dump
 # Dependencies
 /deps
 /_build
+__pycache__/
+*.py[cod]
 
 # Environment
 .env
 .env.local
+/auth/
+*.cookies.txt
 
 # Logs
 *.log

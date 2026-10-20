@@ -16,7 +16,7 @@ PORT="${PORT:-8080}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/video-puller}"
 DATA_DIR="${DATA_DIR:-$HOME/PlexMedia/YouTube}"
 POLL_TIMEOUT_MINUTES="${POLL_TIMEOUT_MINUTES:-720}"
-SUBSCRIPTION_WORKERS="${SUBSCRIPTION_WORKERS:-8}"
+SUBSCRIPTION_WORKERS="${SUBSCRIPTION_WORKERS:-1}"
 SUBSCRIPTION_DAYS="${SUBSCRIPTION_DAYS:-30}"
 POLL_ON_START="${POLL_ON_START:-true}"
 STORAGE_VOLUME="${STORAGE_VOLUME:-}"
@@ -30,6 +30,25 @@ PLEX_MACHINE_ID="${PLEX_MACHINE_ID:-}"
 PLIST_DIR="${PLIST_DIR:-$HOME/Library/LaunchAgents}"
 LABEL="local.video-puller"
 PLIST="$PLIST_DIR/$LABEL.plist"
+# Preserve explicit local-session authorization and recent-only policy on upgrades.
+preserve_launch_setting() {
+  local setting_name=$1
+  local saved_value
+  if ! declare -p "$setting_name" >/dev/null 2>&1 && [[ -f "$PLIST" && -x /usr/libexec/PlistBuddy ]]; then
+    if saved_value="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$setting_name" "$PLIST" 2>/dev/null)"; then
+      printf -v "$setting_name" '%s' "$saved_value"
+    fi
+  fi
+}
+for setting_name in YOUTUBE_COOKIE_FILE YOUTUBE_SESSION_BROWSER YOUTUBE_SESSION_PYTHON YOUTUBE_SESSION_HELPER SUBSCRIPTION_BACKFILL; do
+  preserve_launch_setting "$setting_name"
+done
+YOUTUBE_COOKIE_FILE="${YOUTUBE_COOKIE_FILE:-}"
+YOUTUBE_SESSION_BROWSER="${YOUTUBE_SESSION_BROWSER:-}"
+YOUTUBE_SESSION_PYTHON="${YOUTUBE_SESSION_PYTHON:-}"
+YOUTUBE_SESSION_HELPER="${YOUTUBE_SESSION_HELPER:-$INSTALL_DIR/bin/export-youtube-session.py}"
+SUBSCRIPTION_BACKFILL="${SUBSCRIPTION_BACKFILL:-true}"
+CHANNEL_TIMEOUT_MINUTES="${CHANNEL_TIMEOUT_MINUTES:-10}"
 REPO_URL="https://github.com/lprior-repo/video-puller.git"
 
 info() { printf '\033[0;32m[INFO]\033[0m %s\n' "$1"; }
@@ -48,6 +67,10 @@ xml_escape() {
   value=${value//>/\&gt;}
   printf '%s' "$value"
 }
+
+if [[ -n "$YOUTUBE_SESSION_BROWSER" && ( -z "$YOUTUBE_COOKIE_FILE" || -z "$YOUTUBE_SESSION_PYTHON" ) ]]; then
+  error "Automatic session refresh requires YOUTUBE_COOKIE_FILE and YOUTUBE_SESSION_PYTHON (the ytdl-sub Python interpreter)"
+fi
 
 if [[ "$(uname -s)" != "Darwin" && "${ALLOW_NON_MAC:-0}" != "1" ]]; then
   error "This installer targets macOS (set ALLOW_NON_MAC=1 only for dry runs)"
@@ -128,6 +151,10 @@ fi
 [[ -d "$INSTALL_DIR/build/erlang-shipment" ]] ||
   error "No release at $INSTALL_DIR/build/erlang-shipment"
 
+mkdir -p "$INSTALL_DIR/bin"
+install -m 700 "$SOURCE_DIR/deploy/macos/export_youtube_session.py" \
+  "$INSTALL_DIR/bin/export-youtube-session.py"
+
 LIBRARY_DIR="$DATA_DIR/library"
 info "Preparing data directory $DATA_DIR"
 mkdir -p "$DATA_DIR/logs" "$DATA_DIR/tmp" "$LIBRARY_DIR"
@@ -179,6 +206,18 @@ cat > "$TEMP_PLIST" <<PLIST
     <string>$XML_POLL_TIMEOUT</string>
     <key>SUBSCRIPTION_WORKERS</key>
     <string>$(xml_escape "$SUBSCRIPTION_WORKERS")</string>
+    <key>YOUTUBE_COOKIE_FILE</key>
+    <string>$(xml_escape "$YOUTUBE_COOKIE_FILE")</string>
+    <key>YOUTUBE_SESSION_BROWSER</key>
+    <string>$(xml_escape "$YOUTUBE_SESSION_BROWSER")</string>
+    <key>YOUTUBE_SESSION_PYTHON</key>
+    <string>$(xml_escape "$YOUTUBE_SESSION_PYTHON")</string>
+    <key>YOUTUBE_SESSION_HELPER</key>
+    <string>$(xml_escape "$YOUTUBE_SESSION_HELPER")</string>
+    <key>SUBSCRIPTION_BACKFILL</key>
+    <string>$(xml_escape "$SUBSCRIPTION_BACKFILL")</string>
+    <key>CHANNEL_TIMEOUT_MINUTES</key>
+    <string>$(xml_escape "$CHANNEL_TIMEOUT_MINUTES")</string>
     <key>POLL_ON_START</key>
     <string>$(xml_escape "$POLL_ON_START")</string>
     <key>SUBSCRIPTION_DAYS</key>

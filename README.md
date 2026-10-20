@@ -62,8 +62,8 @@ Then open:
 ### Automated Plex subscriptions
 
 The Gleam subscription worker runs `ytdl-sub` directly in a bounded BEAM pool.
-Set `SUBSCRIPTION_WORKERS=8` and `SUBSCRIPTION_DAYS=30` to download the last
-30 days from eight channels at a time. Change these values on the Subscriptions
+The default `SUBSCRIPTION_WORKERS=1` downloads one channel at a time. Set
+`SUBSCRIPTION_DAYS=30` to limit uploads to the last 30 days. Change these values on the Subscriptions
 page; they persist under `DATA_DIR/ytdl-sub/runtime.json` and apply to the next
 poll. Set `POLL_ON_START=true` to resume polling immediately after service
 startup. Each channel has its own working directory, while its Plex archive stays
@@ -94,8 +94,14 @@ retention. The cutoff is midnight UTC minus the selected number of days.
 
 Polling uses Erlang timers with a cadence measured from poll start; work is
 capped below the interval so a backlog cannot postpone the next cycle.
-Whole-poll failures retry in five minutes. Partial failures retain the normal
-cadence, and completed files and download archives survive retries.
+Recoverable errors, including partial download failures and worker crashes, retry
+automatically after five minutes, doubling up to one hour. A clean poll resets
+the delay. The retry deadline and last successful poll survive BEAM restarts;
+startup honors the deadline. Completed files and download archives survive
+retries. Permanently unavailable individual videos are reported and skipped
+without accelerating the whole schedule. `/health` exposes `downloads` with
+state, consecutive failures, next retry and last success, plus `youtube_session`
+and `auto_download_enabled`, independently of process health.
 
 Global download history lives in `ytdl-sub/download-history/archive.txt`,
 separate from disposable caches. It records completed YouTube IDs durably and
@@ -169,7 +175,7 @@ Pool deadlines and rate limiting use monotonic time and native BEAM timers.
 An upstream child failure restarts its
 dependent services; the web context resolves the replacement subscription
 actor through its stable name. Poll-worker monitors detect crashes immediately
-and schedule a five-minute retry. The download manager has a bounded mailbox
+and schedule an automatic retry with persisted backoff. The download manager has a bounded mailbox
 health check, and `/health` returns 503 if the subscription actor is unresponsive.
 Restart intensity is bounded to ten restarts per minute; launchd restarts the
 VM if the supervisor gives up. Startup reaps only fingerprint-verified orphan
@@ -197,7 +203,7 @@ are stopped before a replacement manager starts.
 
 The Plex preset saves H.264/AAC MP4, the original video title, upload date,
 description, show/genre tags, chapter markers, artwork, episode thumbnails,
-full `.info.json` metadata, and available English/original-language SRT captions
+full `.info.json` metadata, and available English SRT captions
 (both embedded and as sidecars). Completed channels update the database and
 refresh Plex during the poll. Configure `PLEX_URL=http://127.0.0.1:32400` and
 `PLEX_SECTION_ID` to your YouTube library's section ID. The local Plex credential
@@ -397,13 +403,40 @@ The application can be configured using the following environment variables:
 ### Subscription Pulls
 
 Subscriptions pull public channel URLs straight from YouTube with `ytdl-sub`; they
-never read browser cookies. Gleam schedules a bounded pool of channel workers,
+use anonymous requests by default. An explicitly configured `YOUTUBE_COOKIE_FILE`
+can supply a local YouTube session. Requests pause one second between extraction
+requests and a randomized five to ten seconds before each download. Keep the
+cookie file private (mode 0600), outside the repository, and never upload it.
+Gleam schedules a bounded pool of channel workers,
 owns both polling passes, records downloads, and refreshes Plex.
 
-Every poll runs the engine twice over the same channel list: a **recent pass**
+On macOS, the optional `deploy/macos/export_youtube_session.py` helper exports
+only YouTube-domain cookies from a browser you authorize. Run it with the Python
+interpreter from your `ytdl-sub` environment. The installer also copies it to
+`INSTALL_DIR/bin/export-youtube-session.py`. It accepts `--browser` (default:
+Chrome) and `--output`; the default destination is
+`~/Library/Application Support/video-puller/auth/youtube.cookies.txt`. The
+default is manual export. To authorize automatic refresh before every poll, set
+`YOUTUBE_SESSION_BROWSER=chrome` (or `firefox`/`safari`),
+`YOUTUBE_SESSION_PYTHON` to the Python interpreter that has `yt_dlp`, and
+`YOUTUBE_COOKIE_FILE` to the private export path. The installer supplies
+`YOUTUBE_SESSION_HELPER` pointing to the installed helper and preserves these
+settings on upgrades. An explicit empty browser setting disables refresh.
+Refresh has a 30-second deadline and atomically replaces the export only on
+success. A locked or inaccessible browser keeps the saved session available;
+the next poll retries refresh. If no export exists, polling reports the local
+access failure and backs off. macOS browser permissions must cover the runtime
+interpreter. Account challenges can still require signing in locally; the
+service reports the failure and keeps retrying instead of silently stopping.
+
+By default each poll runs the engine twice over the same channel list: a **recent pass**
 that inspects only the newest uploads of each channel, then a **backfill pass**
 that works through remaining uploads within the configured age limit. A fresh upload is therefore picked up on
-the next poll even while a long first backfill is still running.
+the next poll even while a long first backfill is still running. Set
+`SUBSCRIPTION_BACKFILL=false` for recent uploads only. Each channel has a
+10-minute deadline (configurable from 1 to 60 minutes). A shared authentication
+or rate-limit failure stops pending channel requests and skips backfill, allowing
+the scheduler to refresh the session and retry with backoff.
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
@@ -412,7 +445,13 @@ the next poll even while a long first backfill is still running.
 | `POLL_TIMEOUT_MINUTES` | Total deadline for one poll, both passes included | `360` | No |
 | `RECENT_VIDEOS` | Newest uploads the recent pass checks per channel | `5` | No |
 | `RECENT_PHASE_MINUTES` | Budget cap for the recent pass (never more than a quarter of the poll) | `30` | No |
-| `SUBSCRIPTION_WORKERS` | Simultaneous channel workers, configurable from 1 to 16 in the UI | `1` (`8` in macOS installer) | No |
+| `SUBSCRIPTION_WORKERS` | Simultaneous channel workers, configurable from 1 to 16 in the UI | `1` | No |
+| `YOUTUBE_COOKIE_FILE` | Private local YouTube session file | Unset (anonymous) | No |
+| `YOUTUBE_SESSION_BROWSER` | Explicit opt-in to refresh local browser cookies before polling | Unset (disabled) | No |
+| `YOUTUBE_SESSION_PYTHON` | Python interpreter containing yt_dlp, required for automatic refresh | Unset | No |
+| `YOUTUBE_SESSION_HELPER` | Local export helper path | Set by macOS installer | No |
+| `CHANNEL_TIMEOUT_MINUTES` | Per-channel deadline, clamped to 1–60 minutes | `10` | No |
+| `SUBSCRIPTION_BACKFILL` | Run the historical pass after recent uploads | `true` | No |
 | `SUBSCRIPTION_DAYS` | Upload age limit for both passes; 0 means full history | `0` (`30` in macOS installer) | No |
 | `SUBSCRIPTION_SKIP_RESTRICTED` | Skip videos marked premium-only or subscriber-only by yt-dlp; missing availability metadata passes | `true` | No |
 | `POLL_ON_START` | Start an enabled subscription poll immediately at startup | `false` (`true` in macOS installer) | No |
@@ -533,7 +572,7 @@ Ready-for-Plex checklist:
    `genre`, `synopsis`, `show`), so Plex has metadata even before it fetches
    anything online; chapters are embedded when the source provides them.
    Source video titles are retained, alongside full info JSON, artwork,
-   thumbnails, and available English/original-language captions as SRT sidecars
+   thumbnails, and available English captions as SRT sidecars
    and embedded subtitles.
 3. Plex must be able to read the tree. The bundled Linux installer leaves the
    data root mode 711 (traversable, not listable) with `library/` at 755, so a

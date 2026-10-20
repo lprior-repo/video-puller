@@ -1421,7 +1421,7 @@ pub fn subscriptions_page(
             ]),
             p([class("text-sm text-gray-400 mt-2")], [
               text(
-                "Subscription channels are listed in channels.txt beside that folder - one public YouTube channel, playlist or video URL per line, optionally as \"Label = URL\" to name the Plex show. Drop a Google Takeout subscriptions.csv there to import channels without signing in. The upload age limit applies to both poll passes; 0 allows all available history. Independent channels run in parallel up to the configured worker count. No browser cookies are used.",
+                "Subscription channels are listed in channels.txt beside that folder - one public YouTube channel, playlist or video URL per line, optionally as \"Label = URL\" to name the Plex show. Drop a Google Takeout subscriptions.csv there to import channels without signing in. The upload age limit applies to both poll passes; 0 allows all available history. Independent channels run in parallel up to the configured worker count. Downloads use anonymous requests unless a local YouTube session is configured.",
               ),
             ]),
             channel_add_form(),

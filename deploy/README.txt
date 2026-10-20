@@ -37,7 +37,7 @@ no root and can use a user-installed toolchain (mise shims provide `erl` and
      mkdir -p ~/.config/systemd/user
      cat > ~/.config/systemd/user/video-puller.service <<'EOF'
      [Unit]
-     Description=video-puller (YouTube subscription downloads, no cookies)
+     Description=video-puller (YouTube subscription downloads)
      After=network-online.target
      Wants=network-online.target
 
@@ -115,10 +115,19 @@ there:
 DATA_DIR is resolved to an absolute path at startup, so a relative value cannot
 produce relative library paths in the engine's output.
 
-Subscription pulls (no cookies):
--------------------------------
-Subscriptions use public channel URLs only - no browser profile, no cookies, no
-account access.
+Subscription pulls:
+-------------------
+Subscriptions use public channel URLs and anonymous requests by default. An
+explicitly authorized local session may be configured with YOUTUBE_COOKIE_FILE.
+Keep that file private (0600), readable by the service user, and outside the
+repository. Browser access is disabled by default. On macOS, explicit opt-in
+YOUTUBE_SESSION_BROWSER=chrome plus YOUTUBE_SESSION_PYTHON (the interpreter
+with yt_dlp) refreshes the private export before every poll. The installer
+supplies the installed helper path and preserves these settings on upgrades.
+Failed refreshes preserve the previous export. Recoverable errors and partial
+failures retry after 5, 10, 20, 40 and then 60 minutes, with the retry deadline
+persisted across BEAM restarts. /health reports downloads and session status
+separately from process health. Local account challenges require local sign-in.
 
 1. Open http://<host>:8080/subscriptions
 2. Add channels to /var/lib/video-puller/ytdl-sub/channels.txt, one per line:
@@ -139,6 +148,9 @@ account access.
    both passes with their file/error counts:
        Poll pass 1/2 - recent uploads: up to 30 min
        Poll pass 2/2 - backfill: up to 330 min
+   Set SUBSCRIPTION_BACKFILL=false for recent uploads only. Each channel has
+   a CHANNEL_TIMEOUT_MINUTES deadline (default 10, range 1-60); shared
+   authentication/rate-limit failures stop pending requests and skip backfill.
 
 Plex:
 -----

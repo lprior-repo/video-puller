@@ -24,7 +24,9 @@ pub fn preset_block(days: Int) -> String {
   <> "    subtitles_name: \"{episode_file_path}.{lang}.{subtitles_ext}\"\n"
   <> "    subtitles_type: srt\n"
   <> "    embed_subtitles: True\n"
-  <> "    languages: [\"en.*\", \".*-orig\"]\n"
+  // English already includes en-orig. Matching every *-orig track also
+  // fetches captions for translated audio tracks and can exhaust a poll.
+  <> "    languages: [\"en.*\"]\n"
   <> "    allow_auto_generated_subtitles: True\n"
 }
 

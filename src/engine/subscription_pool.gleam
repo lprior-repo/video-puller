@@ -10,6 +10,19 @@ pub fn run(
   execute: fn(job, Int) -> Result(value, String),
   finished: fn(Result(value, String)) -> Nil,
 ) -> List(Result(value, String)) {
+  run_with_stop(jobs, workers, timeout_ms, execute, finished, fn(_) { False })
+}
+
+/// Stop dispatch and drain in-flight work when a shared upstream failure is
+/// detected. The callback still receives every completed result.
+pub fn run_with_stop(
+  jobs: List(job),
+  workers: Int,
+  timeout_ms: Int,
+  execute: fn(job, Int) -> Result(value, String),
+  finished: fn(Result(value, String)) -> Nil,
+  stop: fn(Result(value, String)) -> Bool,
+) -> List(Result(value, String)) {
   let subject = process.new_subject()
   let pending = list.index_map(jobs, fn(job, index) { #(index, job) })
   let deadline = now() + timeout_ms
@@ -22,6 +35,7 @@ pub fn run(
     deadline,
     execute,
     finished,
+    stop,
   )
 }
 
@@ -35,12 +49,46 @@ pub fn run_ordered(
   execute: fn(job, Int) -> Result(value, String),
   finished: fn(Result(value, String)) -> Nil,
 ) -> List(Result(value, String)) {
+  run_ordered_with_stop(
+    serial_jobs,
+    parallel_jobs,
+    workers,
+    timeout_ms,
+    execute,
+    finished,
+    fn(_) { False },
+  )
+}
+
+pub fn run_ordered_with_stop(
+  serial_jobs: List(job),
+  parallel_jobs: List(job),
+  workers: Int,
+  timeout_ms: Int,
+  execute: fn(job, Int) -> Result(value, String),
+  finished: fn(Result(value, String)) -> Nil,
+  stop: fn(Result(value, String)) -> Bool,
+) -> List(Result(value, String)) {
   let started = now()
-  let serial = run(serial_jobs, 1, timeout_ms, execute, finished)
+  let serial =
+    run_with_stop(serial_jobs, 1, timeout_ms, execute, finished, stop)
   let elapsed = now() - started
   let remaining = int.max(timeout_ms - elapsed, 0)
-  let parallel = run(parallel_jobs, workers, remaining, execute, finished)
-  list.append(serial, parallel)
+  case list.any(serial, stop) {
+    True -> serial
+    False ->
+      list.append(
+        serial,
+        run_with_stop(
+          parallel_jobs,
+          workers,
+          remaining,
+          execute,
+          finished,
+          stop,
+        ),
+      )
+  }
 }
 
 fn dispatch(
@@ -52,6 +100,7 @@ fn dispatch(
   deadline: Int,
   execute: fn(job, Int) -> Result(value, String),
   finished: fn(Result(value, String)) -> Nil,
+  stop: fn(Result(value, String)) -> Bool,
 ) -> List(Result(value, String)) {
   let remaining = deadline - now()
   case remaining > 0, pending, list.length(running) < workers {
@@ -72,6 +121,7 @@ fn dispatch(
         deadline,
         execute,
         finished,
+        stop,
       )
     }
     _, [], _ if running == [] -> list.reverse(outcomes)
@@ -89,16 +139,28 @@ fn dispatch(
       case process.receive(subject, remaining) {
         Ok(#(index, outcome)) -> {
           finished(outcome)
-          dispatch(
-            pending,
-            list.filter(running, fn(worker) { worker.0 != index }),
-            [outcome, ..outcomes],
-            subject,
-            workers,
-            deadline,
-            execute,
-            finished,
-          )
+          let active = list.filter(running, fn(worker) { worker.0 != index })
+          case stop(outcome) {
+            True -> {
+              list.each(active, fn(worker) {
+                process.unlink(worker.1)
+                stop_worker(worker.1)
+              })
+              list.reverse([outcome, ..outcomes])
+            }
+            False ->
+              dispatch(
+                pending,
+                active,
+                [outcome, ..outcomes],
+                subject,
+                workers,
+                deadline,
+                execute,
+                finished,
+                stop,
+              )
+          }
         }
         Error(_) ->
           dispatch(
@@ -110,6 +172,7 @@ fn dispatch(
             deadline,
             execute,
             finished,
+            stop,
           )
       }
     }
