@@ -82,7 +82,9 @@ tracks from many translated audio languages and can exhaust the poll deadline.
 Use `just deploy` to update an existing configured Mac. It requires a clean
 source commit that passed the exact `main` push workflow, stages and tests the
 shipment, backs up SQLite, preserves the full LaunchAgent plist, and verifies
-BEAM health plus Plex streaming. Failed activation restores the previous code,
+BEAM health plus Plex streaming. Wait for launchd to remove a stopped job before replacing files; retry transient
+bootstrap failures within a bounded deadline, including during rollback.
+Failed activation restores the previous code,
 database and settings. Do not use fresh-install defaults or overwrite the live
 shipment while it is running.
 

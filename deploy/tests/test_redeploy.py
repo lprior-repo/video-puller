@@ -55,10 +55,14 @@ class RedeployTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('old')
         self.actions = []
+        self.loaded = True
 
     def run_fake(self, args, **kwargs):
         self.actions.append(args)
         self.assertEqual(args[0], 'launchctl')
+        if args[1] == 'bootout': self.loaded = False
+        if args[1] == 'bootstrap': self.loaded = True
+        if args[1] == 'print' and not self.loaded: raise RuntimeError('No such service')
         return ''
 
     def assert_old_restored(self):
@@ -74,7 +78,7 @@ class RedeployTests(unittest.TestCase):
         self.assertTrue(result['deployed'])
         self.assertEqual(self.agent.read_bytes(), self.agent_bytes)
         self.assertEqual((self.destinations['shipment'] / 'version.txt').read_text(), 'new')
-        self.assertEqual([action[1] for action in self.actions], ['bootout', 'bootstrap'])
+        self.assertEqual([action[1] for action in self.actions if action[1] != 'print'], ['bootout', 'bootstrap'])
         backup = Path(result['rollback_directory']) / 'database.sqlite3'
         self.assertEqual(backup.stat().st_mode & 0o777, 0o600)
         with sqlite3.connect(backup) as conn:
@@ -103,7 +107,7 @@ class RedeployTests(unittest.TestCase):
             redeploy.activate(self.installation, self.stage, 'new-sha', run=self.run_fake,
                               health_check=lambda _: {'status': 'ok'}, plex_check=fail_plex)
         self.assert_old_restored()
-        self.assertEqual([action[1] for action in self.actions], ['bootout', 'bootstrap', 'bootout', 'bootstrap'])
+        self.assertEqual([action[1] for action in self.actions if action[1] != 'print'], ['bootout', 'bootstrap', 'bootout', 'bootstrap'])
 
     def test_failed_startup_rolls_back_and_checks_restored_service(self):
         health = iter([False, True])
@@ -137,6 +141,45 @@ class RedeployTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Unexpected LaunchAgent'):
             redeploy_checks.read_installation(self.agent)
         self.assertEqual(self.actions, [])
+
+    def test_stop_waits_for_launchd_to_release_the_job(self):
+        probes = iter([True, True, False])
+        pauses = []
+        def run(args, **kwargs):
+            if args[1] == 'print' and not next(probes):
+                raise RuntimeError('No such service')
+        redeploy.stop_service(self.installation, run=run, pause=pauses.append)
+        self.assertEqual(pauses, [.5, .5])
+        self.assertEqual(list(probes), [])
+
+    def test_bootstrap_retries_transient_eio_after_unload(self):
+        attempts = []
+        pauses = []
+        def run(args, **kwargs):
+            if args[1] == 'bootstrap':
+                attempts.append(True)
+                if len(attempts) < 3: raise RuntimeError('Bootstrap failed: 5')
+            else: raise RuntimeError('No such service')
+        redeploy.start_service(self.installation, run=run, pause=pauses.append)
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(pauses, [.5, .5])
+
+    def test_start_timeout_is_bounded(self):
+        with patch.object(redeploy.time, 'monotonic', side_effect=[0, 46]):
+            with self.assertRaisesRegex(RuntimeError, 'bounded retries'):
+                redeploy.start_service(self.installation, run=lambda *a, **k: self.fail('deadline expired'))
+
+    def test_already_loaded_retry_continues_to_caller_health_check(self):
+        def run(args, **kwargs):
+            if args[1] == 'bootstrap': raise RuntimeError('already loaded')
+            return 'loaded'
+        redeploy.start_service(self.installation, run=run, pause=lambda _: self.fail('no retry needed'))
+
+    def test_stop_timeout_never_swaps_release_assets(self):
+        with patch.object(redeploy.time, 'monotonic', side_effect=[0, 46]):
+            with self.assertRaisesRegex(RuntimeError, 'did not finish unloading'):
+                redeploy.activate(self.installation, self.stage, 'new-sha', run=lambda *a, **k: '')
+        self.assert_old_restored()
 
     def test_ci_gate_requires_exact_main_revision_and_latest_successful_run(self):
         good = {'id': 1, 'head_sha': 'expected', 'head_branch': 'main', 'event': 'push',

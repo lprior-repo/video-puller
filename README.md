@@ -406,7 +406,9 @@ After the initial installation, run `just deploy` from a clean checkout of the
 commit you want deployed. The command requires that exact commit to have passed
 the `main` push workflow in GitHub CI (`gh` must be signed in). It runs the local
 Gleam and deployment tests, builds the macOS shipment, stages it outside the live
-release, backs up SQLite, and restarts the existing LaunchAgent. It preserves the
+release, waits for launchd to finish unloading the old service, backs up SQLite,
+and restarts the existing LaunchAgent with bounded retries for transient reload
+failures. It preserves the
 entire LaunchAgent file, including custom data paths, volume UUID, session
 permissions and disabled backfills. It checks the database, scheduler and a real
 Plex HTTP range stream before accepting the release. A failed activation restores

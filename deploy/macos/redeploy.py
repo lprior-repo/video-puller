@@ -11,8 +11,34 @@ from pathlib import Path
 import shutil
 import sqlite3
 import sys
+import time
 
 from redeploy_checks import command, read_installation, require_ci, verify_plex, verify_storage, wait_health
+
+
+def stop_service(installation, *, run=command, pause=time.sleep):
+    """bootout returns before launchd has necessarily removed the old job."""
+    run(['launchctl', 'bootout', installation['target']], timeout=45)
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        try: run(['launchctl', 'print', installation['target']], timeout=5)
+        except RuntimeError: return
+        pause(.5)
+    raise RuntimeError('LaunchAgent did not finish unloading; release unchanged')
+
+
+def start_service(installation, *, run=command, pause=time.sleep):
+    """Retry launchd's transient EIO while a removed label is being released."""
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        try:
+            run(['launchctl', 'bootstrap', 'gui/' + str(os.getuid()), str(installation['agent'])], timeout=10)
+            return
+        except RuntimeError:
+            try: run(['launchctl', 'print', installation['target']], timeout=5)
+            except RuntimeError: pause(.5)
+            else: return  # A successful load can race a retry; health is checked next.
+    raise RuntimeError('LaunchAgent could not restart after bounded retries')
 
 
 def write_json(path, value):
@@ -58,7 +84,7 @@ def activate(installation, stage, revision, *, run=command,
                ('README.md', app / 'README.md'), ('gleam.toml', app / 'gleam.toml'),
                ('RELEASE.json', app / 'RELEASE.json')]
     moved, installed = [], []
-    run(['launchctl', 'bootout', installation['target']], timeout=45)
+    stop_service(installation, run=run)
     try:
         if db.is_file():
             with closing(sqlite3.connect('file:' + str(db) + '?mode=ro', uri=True)) as current:
@@ -75,7 +101,7 @@ def activate(installation, stage, revision, *, run=command,
                 moved.append((name, destination))
             (stage / name).rename(destination)
             installed.append(destination)
-        run(['launchctl', 'bootstrap', 'gui/' + str(os.getuid()), str(installation['agent'])], timeout=45)
+        start_service(installation, run=run)
         health = health_check(env)
         plex = plex_check(env)
         if installation['agent'].read_bytes() != agent_bytes:
@@ -85,7 +111,7 @@ def activate(installation, stage, revision, *, run=command,
     except BaseException:
         # Stop the candidate before restoring its database or executable files.
         try:
-            run(['launchctl', 'bootout', installation['target']], timeout=45)
+            stop_service(installation, run=run)
         except Exception:
             try: run(['launchctl', 'print', installation['target']], timeout=10)
             except Exception: pass  # Bootstrap may have failed before loading the job.
@@ -103,7 +129,7 @@ def activate(installation, stage, revision, *, run=command,
             shutil.copy2(backup / 'database.sqlite3', db)
         installation['agent'].write_bytes(agent_bytes)
         os.chmod(installation['agent'], 0o600)
-        run(['launchctl', 'bootstrap', 'gui/' + str(os.getuid()), str(installation['agent'])], timeout=45)
+        start_service(installation, run=run)
         health_check(env)
         raise
 
