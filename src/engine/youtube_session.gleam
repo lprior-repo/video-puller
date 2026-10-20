@@ -68,6 +68,18 @@ pub fn refresh_with(
   }
 }
 
+/// Renew just before each serial channel. Concurrent jobs share the poll's
+/// export so one running downloader cannot overwrite another job's refresh.
+pub fn before_channel(
+  workers: Int,
+  refresh: fn() -> Result(Nil, String),
+) -> Result(Nil, String) {
+  case workers {
+    1 -> refresh()
+    _ -> Ok(Nil)
+  }
+}
+
 pub fn status() -> String {
   case simplifile.read(status_path()) {
     Ok(contents) ->

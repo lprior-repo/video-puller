@@ -38,6 +38,7 @@ pub fn blocks_remaining_jobs(errors: List(String)) -> Bool {
         "network unavailable",
         "name resolution",
         "session refresh failed",
+        "youtube account cookies are no longer valid",
       ],
       fn(marker) { string.contains(message, marker) },
     )

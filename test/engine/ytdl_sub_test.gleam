@@ -357,6 +357,26 @@ pub fn interpret_run_result_fails_when_nothing_downloaded_test() {
   string.contains(message, "exit code 1") |> should.be_true()
 }
 
+pub fn authentication_failure_is_not_hidden_by_an_earlier_private_item_test() {
+  let message =
+    ytdl_sub.interpret_run_result(
+      1,
+      "ERROR: Private video\nERROR: Sign in to confirm you're not a bot\n",
+    )
+    |> should.be_error()
+  string.contains(message, "confirm you're not a bot") |> should.be_true()
+}
+
+pub fn expired_cookie_warning_is_a_recoverable_failure_even_on_zero_exit_test() {
+  let summary =
+    ytdl_sub.interpret_run_result(
+      0,
+      "WARNING: The provided YouTube account cookies are no longer valid.\n",
+    )
+    |> should.be_ok()
+  list.length(summary.errors) |> should.equal(1)
+}
+
 /// A non-zero exit with no recognizable error text still surfaces an error
 pub fn interpret_run_result_reports_nonzero_exit_without_error_text_test() {
   let summary =

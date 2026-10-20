@@ -76,6 +76,23 @@ tracks from many translated audio languages and can exhaust the poll deadline.
   a human-triggered `Poll` may bypass the delay. `/health` reports process and
   download-workflow health separately.
 
+### macOS redeployment
+
+Use `just deploy` to update an existing configured Mac. It requires a clean
+source commit that passed the exact `main` push workflow, stages and tests the
+shipment, backs up SQLite, preserves the full LaunchAgent plist, and verifies
+BEAM health plus Plex streaming. Failed activation restores the previous code,
+database and settings. Do not use fresh-install defaults or overwrite the live
+shipment while it is running.
+
+`deploy/macos/auto_redeploy.py --install` explicitly opts into the separate
+five-minute `local.video-puller.updater` LaunchAgent. It waits for active polls
+and deploys only CI-approved main commits through a dedicated local checkout.
+Keep credentials local. One-worker polls renew the authorized browser export
+before each channel; parallel workers share the poll export. Expired-cookie
+warnings must count as recoverable errors, and global authentication failures
+must take priority over an earlier private/unavailable item in engine output.
+
 ### Idempotency guarantees
 
 Repeat runs are safe by construction; keep these invariants when refactoring:

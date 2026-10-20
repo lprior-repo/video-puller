@@ -457,8 +457,12 @@ default is manual export. To authorize automatic refresh before every poll, set
 settings on upgrades. An explicit empty browser setting disables refresh.
 Refresh has a 30-second deadline and atomically replaces the export only on
 success. A locked or inaccessible browser keeps the saved session available;
-the next poll retries refresh. If no export exists, polling reports the local
-access failure and backs off. macOS browser permissions must cover the runtime
+the next poll retries refresh. With one worker, the service also refreshes
+immediately before each channel so long polls do not reuse a rotated browser
+session throughout the batch. Concurrent workers retain one export per poll.
+Expired-cookie warnings count as recoverable failures, and authentication
+failures take priority over earlier unavailable/private-item errors. If no
+export exists, polling reports the local access failure and backs off. macOS browser permissions must cover the runtime
 interpreter. Account challenges can still require signing in locally; the
 service reports the failure and keeps retrying instead of silently stopping.
 

@@ -13,6 +13,7 @@ import engine/subscription_progress
 import engine/subscription_recovery
 import engine/subscription_settings
 import engine/youtube_request_options
+import engine/youtube_session
 import envoy
 import gleam/dict.{type Dict}
 import gleam/int
@@ -1169,6 +1170,10 @@ pub fn run_pull_with_progress(
               workers,
               timeout_ms,
               fn(job, budget) {
+                use _ <- result.try(youtube_session.before_channel(
+                  workers,
+                  youtube_session.refresh,
+                ))
                 run_single(
                   layout.root,
                   phase,
@@ -1826,10 +1831,19 @@ fn is_error_line(line: String) -> Bool {
   string.contains(line, "ERROR")
   || string.contains(line, "Error:")
   || string.contains(line, "[error]")
+  || string.contains(
+    string.lowercase(line),
+    "youtube account cookies are no longer valid",
+  )
 }
 
 fn first_error_line(output: String) -> String {
-  case list.find(string.split(output, "\n"), is_error_line) {
+  let errors = list.filter(string.split(output, "\n"), is_error_line)
+  let shared =
+    list.find(errors, fn(line) {
+      subscription_recovery.blocks_remaining_jobs([line])
+    })
+  case shared |> result.or(list.first(errors)) {
     Ok(line) -> string.trim(line)
     Error(_) -> "no error detail in output"
   }
