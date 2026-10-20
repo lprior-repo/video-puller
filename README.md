@@ -470,7 +470,8 @@ By default each poll runs the engine twice over the same channel list: a **recen
 that inspects only the newest uploads of each channel, then a **backfill pass**
 that works through remaining uploads within the configured age limit. A fresh upload is therefore picked up on
 the next poll even while a long first backfill is still running. Set
-`SUBSCRIPTION_BACKFILL=false` for recent uploads only. Each channel has a
+`SUBSCRIPTION_BACKFILL=false` for recent uploads only, using the whole poll
+budget so a large channel list is not cut off at the backfill split. Each channel has a
 10-minute deadline (configurable from 1 to 60 minutes). A shared authentication
 or rate-limit failure stops pending channel requests and skips backfill, allowing
 the scheduler to refresh the session and retry with backoff.
@@ -481,7 +482,7 @@ the scheduler to refresh the session and retry with backoff.
 | `CHANNELS_TEMPLATE` | Channel list copied into place on first start | `./priv/ytdl-sub/channels.txt` | No |
 | `POLL_TIMEOUT_MINUTES` | Total deadline for one poll, both passes included | `360` | No |
 | `RECENT_VIDEOS` | Newest uploads the recent pass checks per channel | `5` | No |
-| `RECENT_PHASE_MINUTES` | Budget cap for the recent pass (never more than a quarter of the poll) | `30` | No |
+| `RECENT_PHASE_MINUTES` | Recent-pass cap when backfill is enabled (at most a quarter of the poll) | `30` | No |
 | `SUBSCRIPTION_WORKERS` | Simultaneous channel workers, configurable from 1 to 16 in the UI | `1` | No |
 | `YOUTUBE_COOKIE_FILE` | Private local YouTube session file | Unset (anonymous) | No |
 | `YOUTUBE_SESSION_BROWSER` | Explicit opt-in to refresh local browser cookies before polling | Unset (disabled) | No |
@@ -577,7 +578,8 @@ therefore keeps what it already downloaded, and the next poll skips those
 episodes through the download archive.
 `POLL_TIMEOUT_MINUTES` is a total deadline for one poll: the recent pass takes
 at most its configured slice (and never more than a quarter), the backfill pass
-gets the rest, streaming output cannot extend either, and a timed-out pass
+gets the rest. With backfill disabled, the recent pass uses the entire remaining
+poll budget. Streaming output cannot extend either deadline, and a timed-out pass
 reports the tail of its engine output so a stalled enumeration (a very large
 channel) is diagnosable. Each pass reports its own file and error counts, so a
 poll says plainly how much of the list it covered.

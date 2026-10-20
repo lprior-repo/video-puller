@@ -184,11 +184,11 @@ fn wait_for_worker_failure(
 }
 
 pub fn phase_timeouts_never_exceed_remaining_deadline_test() {
-  subscription_manager.phase_timeouts(500, 1_800_000)
+  subscription_manager.phase_timeouts(500, 1_800_000, True)
   |> should.equal(#(125, 375))
-  subscription_manager.phase_timeouts(0, 1_800_000)
+  subscription_manager.phase_timeouts(0, 1_800_000, True)
   |> should.equal(#(0, 0))
-  subscription_manager.phase_timeouts(-1, 1_800_000)
+  subscription_manager.phase_timeouts(-1, 1_800_000, True)
   |> should.equal(#(0, 0))
 }
 
@@ -495,3 +495,15 @@ fn new_pid_file() -> String
 
 @external(erlang, "shell_test_ffi", "delete_tree")
 fn delete_tree(path: String) -> Bool
+
+/// Recent-only cycles must reach late channels without reserving unused backfill.
+pub fn recent_only_poll_uses_the_entire_remaining_budget_test() {
+  subscription_manager.phase_timeouts(21_480_000, 1_800_000, False)
+  |> should.equal(#(21_480_000, 0))
+  subscription_manager.phase_timeouts(500, 1_800_000, False)
+  |> should.equal(#(500, 0))
+  subscription_manager.phase_timeouts(0, 1_800_000, False)
+  |> should.equal(#(0, 0))
+  subscription_manager.phase_timeouts(-1, 1_800_000, False)
+  |> should.equal(#(0, 0))
+}

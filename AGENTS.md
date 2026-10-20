@@ -60,14 +60,15 @@ tracks from many translated audio languages and can exhaust the poll deadline.
   `subscriptions.yaml` (full history) runs on the remaining budget. The recent
   pass takes at most `RECENT_PHASE_MINUTES` (default 30) and never more than a
   quarter of the poll; the backfill always keeps at least a minute.
-  `phase_timeouts/2` owns the split, and `merge_summaries/2` combines the
+  `phase_timeouts/3` owns the split, and `merge_summaries/2` combines the
   outcomes — files from a surviving pass are kept, a failed pass is reported,
   and a file both passes reported is counted once. A persisted `poll_cursor.txt`
   rotates the starting channel each poll, including after timeouts/restarts.
   Cold-cache channel lookups share a bounded preparation budget. Duplicate
   display labels receive unique suffixes before rotation; missing lookup IDs
   never merge unrelated subscriptions.
-  Set `SUBSCRIPTION_BACKFILL=false` to run only the recent pass. Each channel
+  Set `SUBSCRIPTION_BACKFILL=false` to run only the recent pass with the whole
+  poll budget, without reserving time for disabled backfills. Each channel
   has a bounded `CHANNEL_TIMEOUT_MINUTES` (default 10, range 1–60) so one
   stalled source cannot consume the entire poll. Authentication and rate-limit
   failures stop pending requests and skip backfill. Partial download errors

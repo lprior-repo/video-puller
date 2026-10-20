@@ -545,8 +545,9 @@ fn run_pull_worker(db: Db) -> Result(ytdl_sub.PullSummary, String) {
 
 /// Run one poll in two passes over the same channel list
 ///
-/// The recent pass checks fresh uploads first within a slice of the poll
-/// budget, then backfill spends the remaining time on history. Both passes
+/// With backfill enabled, the recent pass checks fresh uploads within a slice
+/// of the poll budget, then backfill spends the remaining time on history.
+/// A recent-only poll uses the whole budget to reach every channel. Both passes
 /// may time out before reaching every channel; the persisted channel rotation
 /// gives later channels the first chance on subsequent polls. Files from a
 /// surviving pass are retained even when the other pass fails.
@@ -556,7 +557,9 @@ fn run_poll_phases(
   db: Db,
 ) -> Result(ytdl_sub.PullSummary, String) {
   use remaining <- result.try(remaining_poll_time(deadline))
-  let #(recent_ms, _) = phase_timeouts(remaining, recent_phase_ms())
+  let backfill_enabled = backfill_enabled()
+  let #(recent_ms, _) =
+    phase_timeouts(remaining, recent_phase_ms(), backfill_enabled)
 
   io.println(
     "Poll pass 1/2 - recent uploads: up to "
@@ -580,7 +583,7 @@ fn run_poll_phases(
     Error(message) -> [message]
   }
   let backfill = case
-    backfill_enabled(),
+    backfill_enabled,
     subscription_recovery.blocks_remaining_jobs(recent_errors)
   {
     False, _ | _, True -> Ok(ytdl_sub.PullSummary(0, [], []))
@@ -655,11 +658,23 @@ fn log_pass(
 
 /// Split the poll budget between the recent-upload pass and the backfill
 ///
-/// The recent pass never takes more than its own setting or a quarter of the
-/// poll budget. Backfill keeps at least a minute whenever the remaining
-/// budget permits, and sub-second remainders never become negative.
-pub fn phase_timeouts(total_ms: Int, recent_ms: Int) -> #(Int, Int) {
+/// With backfill enabled, recent uploads take at most their own setting or a
+/// quarter of the poll, leaving at least a minute for backfill when possible.
+/// With backfill disabled, the recent pass receives the whole poll budget.
+/// Sub-second remainders never become negative.
+pub fn phase_timeouts(
+  total_ms: Int,
+  recent_ms: Int,
+  backfill_enabled: Bool,
+) -> #(Int, Int) {
   let total_ms = int.max(total_ms, 0)
+  case backfill_enabled {
+    False -> #(total_ms, 0)
+    True -> split_phase_timeouts(total_ms, recent_ms)
+  }
+}
+
+fn split_phase_timeouts(total_ms: Int, recent_ms: Int) -> #(Int, Int) {
   let minimum_recent = int.min(1000, total_ms / 4)
   let cap = int.max(int.min(total_ms / 4, recent_ms), minimum_recent)
   let recent =

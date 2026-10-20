@@ -572,15 +572,16 @@ pub fn reconcile_library_records_unreported_files_test() {
 /// setting, and the backfill keeps the rest - at least a minute of it
 pub fn phase_timeouts_split_the_poll_budget_test() {
   // 360 minute poll, 30 minute recent budget
-  subscription_manager.phase_timeouts(21_600_000, 1_800_000)
+  subscription_manager.phase_timeouts(21_600_000, 1_800_000, True)
   |> should.equal(#(1_800_000, 19_800_000))
 
   // A short poll caps the recent pass at a quarter of the budget
-  subscription_manager.phase_timeouts(90_000, 1_800_000)
+  subscription_manager.phase_timeouts(90_000, 1_800_000, True)
   |> should.equal(#(22_500, 67_500))
 
   // Even a tiny budget leaves both passes time to run
-  let #(recent, backfill) = subscription_manager.phase_timeouts(8000, 1_800_000)
+  let #(recent, backfill) =
+    subscription_manager.phase_timeouts(8000, 1_800_000, True)
   recent |> should.equal(1000)
   backfill |> should.equal(7000)
 }
