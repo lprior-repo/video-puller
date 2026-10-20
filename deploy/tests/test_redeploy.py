@@ -80,6 +80,21 @@ class RedeployTests(unittest.TestCase):
         with sqlite3.connect(backup) as conn:
             self.assertEqual(conn.execute('select enabled from settings').fetchall(), [(1,)])
 
+    def test_wal_backup_captures_committed_rows_as_a_standalone_database(self):
+        writer = sqlite3.connect(self.db)
+        self.addCleanup(writer.close)
+        writer.execute('pragma journal_mode=wal')
+        writer.execute('update settings set enabled=7')
+        writer.commit()
+        result = redeploy.activate(self.installation, self.stage, 'new-sha', run=self.run_fake,
+                                   health_check=lambda _: {}, plex_check=lambda _: {})
+        copied = self.data / 'portable-backup.db'
+        import shutil
+        shutil.copyfile(Path(result['rollback_directory']) / 'database.sqlite3', copied)
+        with sqlite3.connect(copied) as check:
+            self.assertEqual(check.execute('select enabled from settings').fetchall(), [(7,)])
+            self.assertEqual(check.execute('pragma quick_check').fetchone(), ('ok',))
+
     def test_plex_failure_restores_old_code_database_and_agent(self):
         def fail_plex(_):
             with sqlite3.connect(self.db) as conn: conn.execute('update settings set enabled=0')

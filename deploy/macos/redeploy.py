@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build, verify and transactionally redeploy this Mac's existing installation."""
 import argparse
+from contextlib import closing
 import datetime
 import fcntl
 import hashlib
@@ -60,8 +61,8 @@ def activate(installation, stage, revision, *, run=command,
     run(['launchctl', 'bootout', installation['target']], timeout=45)
     try:
         if db.is_file():
-            with sqlite3.connect('file:' + str(db) + '?mode=ro', uri=True) as current:
-                with sqlite3.connect(backup / '.database.tmp') as saved:
+            with closing(sqlite3.connect('file:' + str(db) + '?mode=ro', uri=True)) as current:
+                with closing(sqlite3.connect(backup / '.database.tmp')) as saved:
                     current.backup(saved)
                     if saved.execute('pragma quick_check').fetchone() != ('ok',):
                         raise RuntimeError('Pre-deployment database backup failed validation')
