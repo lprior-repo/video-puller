@@ -37,8 +37,13 @@ def once(installation, *, run=command, ci_check=require_ci, health_check=wait_he
         return {'status': 'current', 'commit': current}
     ci_check(source, revision)
     run(['git', 'checkout', '--detach', revision], cwd=source)
+    logs = app / 'deployments'
+    logs.mkdir(mode=0o700, exist_ok=True)
+    log = logs / 'updater-deploy.log'
+    log.touch(mode=0o600, exist_ok=True)
+    os.chmod(log, 0o600)
     run([sys.executable, str(source / 'deploy/macos/redeploy.py'), '--source', str(source),
-         '--agent', str(installation['agent']), '--wait-idle'], timeout=1800)
+         '--agent', str(installation['agent']), '--wait-idle'], timeout=1800, log=log)
     return {'status': 'deployed', 'commit': revision}
 
 

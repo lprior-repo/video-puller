@@ -1,5 +1,6 @@
 """Transactional deployment tests. No test invokes real launchctl or a browser."""
 import json
+from contextlib import closing
 from pathlib import Path
 import plistlib
 import sqlite3
@@ -24,7 +25,7 @@ class RedeployTests(unittest.TestCase):
         self.data = root / 'media'
         self.data.mkdir()
         self.db = self.data / 'video.db'
-        with sqlite3.connect(self.db) as conn:
+        with closing(sqlite3.connect(self.db)) as conn, conn:
             conn.execute('create table settings (enabled integer)')
             conn.execute('insert into settings values (1)')
         self.env = {'DB_PATH': str(self.db), 'DATA_DIR': str(self.data),
@@ -98,6 +99,32 @@ class RedeployTests(unittest.TestCase):
         with sqlite3.connect(copied) as check:
             self.assertEqual(check.execute('select enabled from settings').fetchall(), [(7,)])
             self.assertEqual(check.execute('pragma quick_check').fetchone(), ('ok',))
+
+    def test_closed_wal_backup_can_initialize_shared_memory(self):
+        with sqlite3.connect(self.db) as writer:
+            writer.execute('pragma journal_mode=wal')
+            writer.execute('update settings set enabled=9')
+        writer.execute('pragma wal_checkpoint(TRUNCATE)')
+        writer.close()
+        # Reproduce BEAM's final-close cleanup, including SQLite builds that
+        # otherwise retain empty WAL files after the last writer closes.
+        for suffix in ('-wal', '-shm'):
+            Path(str(self.db) + suffix).unlink(missing_ok=True)
+        self.assertFalse(Path(str(self.db) + '-wal').exists())
+        connect = sqlite3.connect
+        def cold_wal_connect(database, *args, **kwargs):
+            # Reproduce macOS SQLite rejecting a cold WAL in read-only mode.
+            if isinstance(database, str) and database.startswith('file:') and 'mode=ro' in database:
+                raise sqlite3.OperationalError('unable to open database file')
+            return connect(database, *args, **kwargs)
+        with patch.object(redeploy.sqlite3, 'connect', side_effect=cold_wal_connect):
+            result = redeploy.activate(self.installation, self.stage, 'new-sha', run=self.run_fake,
+                                       health_check=lambda _: {}, plex_check=lambda _: {})
+        with connect(Path(result['rollback_directory']) / 'database.sqlite3') as saved:
+            self.assertEqual(saved.execute('select enabled from settings').fetchall(), [(9,)])
+            self.assertEqual(saved.execute('pragma quick_check').fetchone(), ('ok',))
+        with connect(self.db) as current:
+            self.assertEqual(current.execute('select enabled from settings').fetchall(), [(9,)])
 
     def test_plex_failure_restores_old_code_database_and_agent(self):
         def fail_plex(_):

@@ -87,7 +87,9 @@ def activate(installation, stage, revision, *, run=command,
     stop_service(installation, run=run)
     try:
         if db.is_file():
-            with closing(sqlite3.connect('file:' + str(db) + '?mode=ro', uri=True)) as current:
+            # A closed WAL database may need to recreate its shared-memory files.
+            # rw permits that recovery but never creates a missing source database.
+            with closing(sqlite3.connect('file:' + str(db) + '?mode=rw', uri=True)) as current:
                 with closing(sqlite3.connect(backup / '.database.tmp')) as saved:
                     current.backup(saved)
                     if saved.execute('pragma quick_check').fetchone() != ('ok',):
@@ -179,8 +181,9 @@ def main():
         print('Activating tested release; preserving every LaunchAgent setting', flush=True)
         try:
             result = activate(installation, stage, revision)
-        except BaseException:
-            write_json(transaction / 'result.json', {'commit': revision, 'deployed': False, 'rollback_attempted': True})
+        except BaseException as error:
+            write_json(transaction / 'result.json', {'commit': revision, 'deployed': False,
+                'rollback_attempted': True, 'error_type': type(error).__name__, 'error': str(error)})
             raise
         result['ci_url'] = ci_url
         write_json(transaction / 'result.json', result)
