@@ -13,10 +13,10 @@ pub fn initial() -> State {
 
 pub fn permanent_item_error(message: String) -> Bool {
   let message = string.lowercase(message)
-  list.any(
+  !blocks_remaining_jobs([message])
+  && list.any(
     [
       "private video",
-      "video unavailable",
       "video isn't available anymore",
       "removed by the uploader",
       "members-only",

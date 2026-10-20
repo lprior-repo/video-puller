@@ -45,6 +45,30 @@ pub fn permanent_single_video_errors_do_not_trigger_retry_storms_test() {
   |> should.equal(0)
 }
 
+pub fn unavailable_is_not_proof_of_a_permanent_skip_test() {
+  subscription_recovery.complete(
+    State(0, 0, 50, "healthy"),
+    ["Video unavailable. This content isn't available, try again later"],
+    100,
+    300_000,
+  )
+  |> should.equal(State(1, 400, 50, "retrying"))
+}
+
+pub fn authentication_errors_take_precedence_over_item_skip_words_test() {
+  subscription_recovery.permanent_item_error(
+    "Private video: sign in to confirm you're not a bot",
+  )
+  |> should.be_false()
+  subscription_recovery.complete(
+    State(2, 500, 50, "retrying"),
+    ["Video unavailable: HTTP Error 429: Too Many Requests"],
+    1000,
+    300_000,
+  )
+  |> should.equal(State(3, 2200, 50, "retrying"))
+}
+
 pub fn shared_authentication_rate_and_network_failures_stop_the_queue_test() {
   subscription_recovery.blocks_remaining_jobs([
     "HTTP Error 429: Too Many Requests",

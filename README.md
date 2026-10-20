@@ -400,6 +400,39 @@ The application can be configured using the following environment variables:
 | `POLL_INTERVAL_MS` | Polling interval for download queue in milliseconds | `5000` | No |
 | `MAX_CONCURRENCY` | Maximum concurrent downloads | `10` | No |
 
+### Repeatable macOS redeployment
+
+After the initial installation, run `just deploy` from a clean checkout of the
+commit you want deployed. The command requires that exact commit to have passed
+the `main` push workflow in GitHub CI (`gh` must be signed in). It runs the local
+Gleam and deployment tests, builds the macOS shipment, stages it outside the live
+release, backs up SQLite, and restarts the existing LaunchAgent. It preserves the
+entire LaunchAgent file, including custom data paths, volume UUID, session
+permissions and disabled backfills. It checks the database, scheduler and a real
+Plex HTTP range stream before accepting the release. A failed activation restores
+the previous executable, database and settings. Logs and rollback files stay in
+`INSTALL_DIR/deployments/`. `just deploy-check` performs read-only service and
+Plex checks. Keep using `install.sh` for initial setup; use this command for
+upgrades to an existing configured Mac.
+
+For unattended deployment after successful `main` CI, explicitly opt in with:
+
+```sh
+python3 deploy/macos/auto_redeploy.py --install
+```
+
+The local `local.video-puller.updater` LaunchAgent checks every five minutes. A
+separate BEAM process runs it, so restarting the application does not stop its
+deployer. It defers while a subscription poll is active, refuses unloaded jobs,
+fetches only `main`, verifies the exact push-workflow result before running new
+code, and uses a dedicated checkout under `INSTALL_DIR/deployment-source`.
+Credentials and browser sessions stay on this Mac. No inbound port or hosted
+self-managed runner is needed. Disable the trigger with
+`launchctl bootout gui/$(id -u)/local.video-puller.updater`; normal downloading
+continues. Dependency and Erlang upgrades are separate maintenance and can require
+rechecking macOS privacy permissions. Remote playback still needs an off-network
+test.
+
 ### Subscription Pulls
 
 Subscriptions pull public channel URLs straight from YouTube with `ytdl-sub`; they

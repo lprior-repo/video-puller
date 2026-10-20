@@ -98,3 +98,11 @@ update:
 publish:
     gleam publish
 
+
+# Preserve this Mac's installed configuration; require passed CI and rollback on failure.
+deploy:
+    python3 deploy/macos/redeploy.py
+
+# Read-only check of the existing BEAM service and Plex streaming.
+deploy-check:
+    python3 deploy/macos/redeploy.py --check

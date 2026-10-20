@@ -331,3 +331,14 @@ existing plist after validation failure, Linux copy/ownership ordering,
 fresh and existing database permissions, and runtime writable paths. They
 never install software, contact download sites, or start services; native
 macOS launchd and actual systemd startup still require platform validation.
+
+Existing macOS installation updates
+-----------------------------------
+From a clean main checkout, run `just deploy`. The exact main commit must have
+passed GitHub CI and gh must be signed in. This stages and tests the build,
+backs up SQLite, preserves the existing plist and all its custom settings,
+verifies runtime and Plex streaming, and rolls back a failed activation.
+`just deploy-check` checks the existing installation without changing it.
+To opt into the local five-minute CI-gated trigger, run:
+    python3 deploy/macos/auto_redeploy.py --install
+It waits for active subscription polls and never deploys PR builds.
